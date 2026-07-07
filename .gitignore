@@ -1,0 +1,28 @@
+# Dependencias
+node_modules/
+
+# Variables de entorno (contienen contraseñas, nunca se suben)
+.env
+.env.local
+backend/.env
+
+# Archivos subidos temporalmente (Excel procesados)
+backend/uploads/
+
+# Base de datos local (si alguna vez se vuelve a usar SQLite)
+*.db
+*.db-journal
+*.db-shm
+*.db-wal
+
+# Build de producción del frontend
+frontend/dist/
+
+# Logs
+npm-debug.log*
+*.log
+
+# Sistema operativo / editor
+.DS_Store
+Thumbs.db
+.vscode/
