@@ -3,15 +3,32 @@ const XLSX = require('xlsx');
 // --- Helpers de formato ---
 
 // Convierte cualquier valor de fecha de Excel (Date, string) a 'YYYY-MM-DD'
+// Convierte cualquier valor de fecha de Excel (Date, string) a 'YYYY-MM-DD'.
+// Importante: si la fecha viene como texto, NUNCA se usa `new Date(string)`
+// directamente, porque JS interpreta por defecto en formato americano
+// (MM/DD/AAAA) y eso corrompe silenciosamente fechas chilenas (DD/MM/AAAA),
+// por ejemplo "08/07/2026" (8 de julio) se leería como 7 de agosto.
 function toFechaISO(val) {
   if (val instanceof Date) {
     return val.toISOString().slice(0, 10);
   }
   if (typeof val === 'string') {
-    // ya viene como '2026-04-01' o similar
-    const d = new Date(val);
+    const s = val.trim();
+
+    // Ya viene en formato ISO: '2026-07-08'
+    if (/^\d{4}-\d{2}-\d{2}$/.test(s)) return s;
+
+    // Formato chileno explícito: 'DD/MM/AAAA' o 'DD-MM-AAAA'
+    const m = s.match(/^(\d{1,2})[\/\-](\d{1,2})[\/\-](\d{4})$/);
+    if (m) {
+      const [, dd, mm, yyyy] = m;
+      return `${yyyy}-${mm.padStart(2, '0')}-${dd.padStart(2, '0')}`;
+    }
+
+    // Último recurso (formatos no reconocidos arriba, ej. con nombre de mes)
+    const d = new Date(s);
     if (!isNaN(d)) return d.toISOString().slice(0, 10);
-    return val;
+    return s;
   }
   return null;
 }
@@ -55,6 +72,29 @@ const ALIAS_JEFE_TURNO = {};
 
 function resolverJefeTurno(codigo) {
   return ALIAS_JEFE_TURNO[codigo] || codigo;
+}
+
+// Determina el tipo de turno (AM/PM/NOCHE/PLANO) de un código de jefe de turno
+// para una fecha dada, usando el mapa de 'rotacion_base' construido a partir
+// de la tabla rotacion_turnos (key 'sem|jefe_turno' -> 'AM'|'PM'|'NOCHE').
+function determinarTipoTurno(codigoJefeTurno, fecha, rotacionBasePorClave) {
+  if (!codigoJefeTurno) return null;
+  if (codigoJefeTurno === 'CG' || codigoJefeTurno === 'PLANO') return 'PLANO';
+  const codigoResuelto = resolverJefeTurno(codigoJefeTurno);
+  const sem = semanaISO(fecha);
+  return rotacionBasePorClave.get(`${sem}|${codigoResuelto}`) || null;
+}
+
+// Minutos de colación a aplicar sobre el total de horas trabajadas, según el
+// tipo de turno. Turno Noche: la colación es a mitad de jornada (está dentro
+// del rango marcado) -> se RESTA para obtener horas efectivas reales.
+// Turno AM/PM/Plano: la colación es al final del turno (la persona marca
+// salida antes de que termine oficialmente) -> se SUMA para completar el
+// total de horas pagadas.
+function minutosAjusteColacion(tipoTurno) {
+  if (tipoTurno === 'NOCHE') return -60;
+  if (tipoTurno === 'AM' || tipoTurno === 'PM' || tipoTurno === 'PLANO') return 30;
+  return 0;
 }
 
 // Suma (o resta, con delta negativo) días a una fecha 'YYYY-MM-DD'
@@ -104,7 +144,7 @@ function parseTalana(path) {
   const ws = wb.Sheets[wb.SheetNames[0]];
   const rows = XLSX.utils.sheet_to_json(ws, { defval: null });
   return rows.map(r => ({
-    rut: (r['Rut'] || '').trim(),
+    rut: limpiarRut(r['Rut']),
     fecha: toFechaISO(r['Fecha']),
     hora: toHoraStr(r['Hora']),
     tipo: (r['Dirección'] || '').trim(), // ojo: esta columna trae 'Entrada'/'Salida'
@@ -113,12 +153,24 @@ function parseTalana(path) {
   })).filter(r => r.rut && r.fecha && r.hora);
 }
 
+// Normaliza un RUT quitando puntos y espacios, dejando 'NNNNNNNN-D'.
+// Acepta tanto '1.123.123-1' como '11231231' (sin guion, si acaso) y los
+// deja en el mismo formato que usa el resto del sistema.
+function limpiarRut(val) {
+  if (!val) return '';
+  let s = val.toString().trim().toUpperCase().replace(/\./g, '').replace(/\s/g, '');
+  if (!s.includes('-') && s.length > 1) {
+    s = `${s.slice(0, -1)}-${s.slice(-1)}`;
+  }
+  return s;
+}
+
 function parseCencosud(path) {
   const wb = leerHojas(path);
   const ws = wb.Sheets[wb.SheetNames[0]];
   const rows = XLSX.utils.sheet_to_json(ws, { defval: null });
   return rows.map(r => ({
-    rut: (r['RUT'] || '').trim(),
+    rut: limpiarRut(r['RUT']),
     fecha: toFechaISO(r['FECHA']),
     hora_entrada: toHoraStr(r['HENTRADA']),
     hora_salida: toHoraStr(r['HSALIDA']),
@@ -132,7 +184,7 @@ function parseMaestro(path) {
   const ws = wb.Sheets[wb.SheetNames[0]];
   const rows = XLSX.utils.sheet_to_json(ws, { defval: null });
   return rows.map(r => ({
-    rut: (r['RUT'] || '').trim(),
+    rut: limpiarRut(r['RUT']),
     nombre: r['Nombre'] || '',
     apellido_paterno: r['Apellido Paterno'] || '',
     apellido_materno: r['Apellido Materno'] || '',
@@ -151,6 +203,7 @@ function parseRotacion(path) {
   return rows.map(r => ({
     sem: Number(r['Sem']),
     jefe_turno: r['Jefe Turno'],
+    rotacion_base: r['Rotacion Base'] || null, // 'AM' | 'PM' | 'NOCHE'
     dia: r['Dia'],
     hora_entrada: toHoraStr(r['Entrada']),
     hora_salida: toHoraStr(r['Salida']),
@@ -164,7 +217,7 @@ function parseAsignacion(path) {
   const ws = wb.Sheets['Asignacion_Jt'];
   const rows = XLSX.utils.sheet_to_json(ws, { defval: null });
   return rows.map(r => ({
-    rut: (r['RUT'] || '').trim(),
+    rut: limpiarRut(r['RUT']),
     nombre: r['NOMBRE Y APELLIDO'] || '',
     cargo: r['CARGO'] || '',
     jefe_turno: r['Jefe de Turno'] || null,
@@ -184,81 +237,126 @@ function contratoDesdeRazonSocial(razonSocial) {
 
 // --- Carga a base de datos (PostgreSQL, asíncrono) ---
 
+// Inserta 'filas' (array de arrays, mismo orden que 'columnas') en lotes grandes
+// en vez de una consulta por fila, para que cargas de miles de registros tomen
+// segundos en vez de minutos/horas contra una base remota.
+async function insertarEnLote(client, tabla, columnas, filas, onConflictSql = '', tamanoLote = 500) {
+  if (filas.length === 0) return;
+  const nCols = columnas.length;
+  const totalLotes = Math.ceil(filas.length / tamanoLote);
+
+  for (let i = 0; i < filas.length; i += tamanoLote) {
+    const numeroLote = Math.floor(i / tamanoLote) + 1;
+    const lote = filas.slice(i, i + tamanoLote);
+    const valoresSql = [];
+    const params = [];
+    lote.forEach((fila, idx) => {
+      const base = idx * nCols;
+      const placeholders = fila.map((_, j) => `$${base + j + 1}`).join(',');
+      valoresSql.push(`(${placeholders})`);
+      params.push(...fila);
+    });
+
+    const inicio = Date.now();
+    await client.query(
+      `INSERT INTO ${tabla} (${columnas.join(',')}) VALUES ${valoresSql.join(',')} ${onConflictSql}`,
+      params
+    );
+    const ms = Date.now() - inicio;
+    console.log(`  [${tabla}] lote ${numeroLote}/${totalLotes} (${lote.length} filas) en ${ms}ms`);
+  }
+}
+
 async function cargarTodo(pool, paths) {
+  console.log('--- Iniciando cargarTodo ---');
   const client = await pool.connect();
   try {
     await client.query('BEGIN');
 
+    console.log('Borrando tablas...');
     await client.query('DELETE FROM marcaciones_talana');
     await client.query('DELETE FROM marcaciones_cencosud');
     await client.query('DELETE FROM rotacion_turnos');
     await client.query('DELETE FROM jefe_turno_asignacion');
     await client.query('DELETE FROM contrato_rut');
+    console.log('Tablas borradas.');
 
     if (paths.maestro) {
-      for (const e of parseMaestro(paths.maestro)) {
-        await client.query(
-          `INSERT INTO empleados (rut, nombre, apellido_paterno, apellido_materno, cargo, empresa, centro_costo, fecha_ingreso, vigente)
-           VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)
-           ON CONFLICT (rut) DO UPDATE SET
-             nombre=EXCLUDED.nombre, apellido_paterno=EXCLUDED.apellido_paterno, apellido_materno=EXCLUDED.apellido_materno,
-             cargo=EXCLUDED.cargo, empresa=EXCLUDED.empresa, centro_costo=EXCLUDED.centro_costo,
-             fecha_ingreso=EXCLUDED.fecha_ingreso, vigente=EXCLUDED.vigente`,
-          [e.rut, e.nombre, e.apellido_paterno, e.apellido_materno, e.cargo, e.empresa, e.centro_costo, e.fecha_ingreso, e.vigente]
-        );
-      }
+      console.log('Cargando maestro...');
+      const empleadosParseados = parseMaestro(paths.maestro);
+      // El archivo puede traer el mismo RUT más de una vez (distintos contratos/CDs).
+      // Nos quedamos con el último registro de cada persona para evitar que el
+      // INSERT en lote falle por intentar actualizar la misma fila dos veces.
+      const porRut = new Map();
+      for (const e of empleadosParseados) porRut.set(e.rut, e);
+      const filas = [...porRut.values()].map(e => [
+        e.rut, e.nombre, e.apellido_paterno, e.apellido_materno, e.cargo, e.empresa, e.centro_costo, e.fecha_ingreso, e.vigente,
+      ]);
+      console.log(`Maestro: ${empleadosParseados.length} filas parseadas, ${filas.length} RUT únicos, insertando...`);
+      await insertarEnLote(
+        client, 'empleados',
+        ['rut', 'nombre', 'apellido_paterno', 'apellido_materno', 'cargo', 'empresa', 'centro_costo', 'fecha_ingreso', 'vigente'],
+        filas,
+        `ON CONFLICT (rut) DO UPDATE SET
+           nombre=EXCLUDED.nombre, apellido_paterno=EXCLUDED.apellido_paterno, apellido_materno=EXCLUDED.apellido_materno,
+           cargo=EXCLUDED.cargo, empresa=EXCLUDED.empresa, centro_costo=EXCLUDED.centro_costo,
+           fecha_ingreso=EXCLUDED.fecha_ingreso, vigente=EXCLUDED.vigente`
+      );
+      console.log('Maestro insertado.');
     }
 
     if (paths.talana) {
+      console.log('Cargando talana...');
       const marcacionesTalana = parseTalana(paths.talana);
-      for (const m of marcacionesTalana) {
-        await client.query(
-          `INSERT INTO marcaciones_talana (rut, fecha, hora, tipo, sucursal) VALUES ($1,$2,$3,$4,$5)`,
-          [m.rut, m.fecha, m.hora, m.tipo, m.sucursal]
-        );
-      }
+      console.log(`Talana: ${marcacionesTalana.length} filas parseadas, insertando...`);
+      const filas = marcacionesTalana.map(m => [m.rut, m.fecha, m.hora, m.tipo, m.sucursal]);
+      await insertarEnLote(client, 'marcaciones_talana', ['rut', 'fecha', 'hora', 'tipo', 'sucursal'], filas);
+      console.log('Talana insertado.');
+
       const razonPorRut = new Map();
       for (const m of marcacionesTalana) if (m.razon_social) razonPorRut.set(m.rut, m.razon_social);
-      for (const [rut, razon_social] of razonPorRut) {
-        await client.query(
-          `INSERT INTO contrato_rut (rut, razon_social) VALUES ($1,$2)
-           ON CONFLICT (rut) DO UPDATE SET razon_social=EXCLUDED.razon_social`,
-          [rut, razon_social]
-        );
-      }
+      const filasContrato = [...razonPorRut.entries()].map(([rut, razon_social]) => [rut, razon_social]);
+      await insertarEnLote(
+        client, 'contrato_rut', ['rut', 'razon_social'], filasContrato,
+        `ON CONFLICT (rut) DO UPDATE SET razon_social=EXCLUDED.razon_social`
+      );
+      console.log('Contrato_rut insertado.');
     }
 
     if (paths.cencosud) {
-      for (const m of parseCencosud(paths.cencosud)) {
-        await client.query(
-          `INSERT INTO marcaciones_cencosud (rut, fecha, hora_entrada, hora_salida, turno, local) VALUES ($1,$2,$3,$4,$5,$6)`,
-          [m.rut, m.fecha, m.hora_entrada, m.hora_salida, m.turno, m.local]
-        );
-      }
+      console.log('Cargando cencosud...');
+      const filas = parseCencosud(paths.cencosud).map(m => [m.rut, m.fecha, m.hora_entrada, m.hora_salida, m.turno, m.local]);
+      console.log(`Cencosud: ${filas.length} filas parseadas, insertando...`);
+      await insertarEnLote(client, 'marcaciones_cencosud', ['rut', 'fecha', 'hora_entrada', 'hora_salida', 'turno', 'local'], filas);
+      console.log('Cencosud insertado.');
     }
 
     if (paths.parametros) {
-      for (const r of parseRotacion(paths.parametros)) {
-        await client.query(
-          `INSERT INTO rotacion_turnos (sem, jefe_turno, dia, hora_entrada, hora_salida, colacion, jornada) VALUES ($1,$2,$3,$4,$5,$6,$7)`,
-          [r.sem, r.jefe_turno, r.dia, r.hora_entrada, r.hora_salida, r.colacion, r.jornada]
-        );
-      }
+      console.log('Cargando parametros...');
+      const filas = parseRotacion(paths.parametros).map(r => [r.sem, r.jefe_turno, r.rotacion_base, r.dia, r.hora_entrada, r.hora_salida, r.colacion, r.jornada]);
+      await insertarEnLote(client, 'rotacion_turnos', ['sem', 'jefe_turno', 'rotacion_base', 'dia', 'hora_entrada', 'hora_salida', 'colacion', 'jornada'], filas);
+      console.log('Parametros insertado.');
     }
 
     if (paths.asignacion) {
-      for (const a of parseAsignacion(paths.asignacion)) {
-        await client.query(
-          `INSERT INTO jefe_turno_asignacion (rut, nombre, cargo, jefe_turno, centro_costo) VALUES ($1,$2,$3,$4,$5)
-           ON CONFLICT (rut) DO UPDATE SET nombre=EXCLUDED.nombre, cargo=EXCLUDED.cargo,
-             jefe_turno=EXCLUDED.jefe_turno, centro_costo=EXCLUDED.centro_costo`,
-          [a.rut, a.nombre, a.cargo, a.jefe_turno, a.centro_costo]
-        );
-      }
+      console.log('Cargando asignacion...');
+      const asignacionesParseadas = parseAsignacion(paths.asignacion);
+      const porRut = new Map();
+      for (const a of asignacionesParseadas) porRut.set(a.rut, a);
+      const filas = [...porRut.values()].map(a => [a.rut, a.nombre, a.cargo, a.jefe_turno, a.centro_costo]);
+      await insertarEnLote(
+        client, 'jefe_turno_asignacion', ['rut', 'nombre', 'cargo', 'jefe_turno', 'centro_costo'], filas,
+        `ON CONFLICT (rut) DO UPDATE SET nombre=EXCLUDED.nombre, cargo=EXCLUDED.cargo,
+           jefe_turno=EXCLUDED.jefe_turno, centro_costo=EXCLUDED.centro_costo`
+      );
+      console.log('Asignacion insertado.');
     }
 
+    console.log('Haciendo COMMIT...');
     await client.query('COMMIT');
+    console.log('--- cargarTodo terminado OK ---');
   } catch (err) {
+    console.log('ERROR, haciendo ROLLBACK:', err.message);
     await client.query('ROLLBACK');
     throw err;
   } finally {
@@ -281,21 +379,18 @@ async function cargarTalanaIncremental(pool, path) {
     for (const f of fechas) {
       await client.query('DELETE FROM marcaciones_talana WHERE fecha = $1', [f]);
     }
-    for (const m of marcaciones) {
-      await client.query(
-        `INSERT INTO marcaciones_talana (rut, fecha, hora, tipo, sucursal) VALUES ($1,$2,$3,$4,$5)`,
-        [m.rut, m.fecha, m.hora, m.tipo, m.sucursal]
-      );
-    }
+
+    const filas = marcaciones.map(m => [m.rut, m.fecha, m.hora, m.tipo, m.sucursal]);
+    await insertarEnLote(client, 'marcaciones_talana', ['rut', 'fecha', 'hora', 'tipo', 'sucursal'], filas);
+
     const razonPorRut = new Map();
     for (const m of marcaciones) if (m.razon_social) razonPorRut.set(m.rut, m.razon_social);
-    for (const [rut, razon_social] of razonPorRut) {
-      await client.query(
-        `INSERT INTO contrato_rut (rut, razon_social) VALUES ($1,$2)
-         ON CONFLICT (rut) DO UPDATE SET razon_social=EXCLUDED.razon_social`,
-        [rut, razon_social]
-      );
-    }
+    const filasContrato = [...razonPorRut.entries()].map(([rut, razon_social]) => [rut, razon_social]);
+    await insertarEnLote(
+      client, 'contrato_rut', ['rut', 'razon_social'], filasContrato,
+      `ON CONFLICT (rut) DO UPDATE SET razon_social=EXCLUDED.razon_social`
+    );
+
     await client.query('COMMIT');
   } catch (err) {
     await client.query('ROLLBACK');
@@ -318,12 +413,10 @@ async function cargarCencosudIncremental(pool, path) {
     for (const f of fechas) {
       await client.query('DELETE FROM marcaciones_cencosud WHERE fecha = $1', [f]);
     }
-    for (const m of marcaciones) {
-      await client.query(
-        `INSERT INTO marcaciones_cencosud (rut, fecha, hora_entrada, hora_salida, turno, local) VALUES ($1,$2,$3,$4,$5,$6)`,
-        [m.rut, m.fecha, m.hora_entrada, m.hora_salida, m.turno, m.local]
-      );
-    }
+
+    const filas = marcaciones.map(m => [m.rut, m.fecha, m.hora_entrada, m.hora_salida, m.turno, m.local]);
+    await insertarEnLote(client, 'marcaciones_cencosud', ['rut', 'fecha', 'hora_entrada', 'hora_salida', 'turno', 'local'], filas);
+
     await client.query('COMMIT');
   } catch (err) {
     await client.query('ROLLBACK');
@@ -339,5 +432,6 @@ module.exports = {
   parseTalana, parseCencosud, parseMaestro, parseRotacion, parseAsignacion,
   cargarTodo, cargarTalanaIncremental, cargarCencosudIncremental,
   diaDeSemana, semanaISO, resolverJefeTurno, toFechaISO, toHoraStr,
-  contratoDesdeRazonSocial, sumarDias, fusionarTurnosNocturnos,
+  contratoDesdeRazonSocial, sumarDias, fusionarTurnosNocturnos, limpiarRut,
+  determinarTipoTurno, minutosAjusteColacion,
 };

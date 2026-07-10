@@ -292,6 +292,71 @@ tbody tr:hover { background: var(--surface-2); }
 .atraso-cell.leve { color: var(--warn); font-weight: 600; }
 .atraso-cell.severo { color: var(--danger); font-weight: 700; }
 
+.matriz-scroll {
+  overflow: auto;
+  max-height: 70vh;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+}
+
+.matriz-table {
+  border-collapse: separate;
+  border-spacing: 0;
+  font-size: 0.76rem;
+}
+
+.matriz-table th, .matriz-table td {
+  border-right: 1px solid var(--border);
+  border-bottom: 1px solid var(--border);
+  padding: 4px 6px;
+  text-align: center;
+  white-space: nowrap;
+}
+
+.matriz-table th {
+  background: var(--surface);
+  position: sticky;
+  top: 0;
+  z-index: 2;
+  font-weight: 500;
+  color: var(--text-muted);
+}
+
+.matriz-table td.col-fija, .matriz-table th.col-fija {
+  position: sticky;
+  background: var(--surface);
+  z-index: 3;
+  text-align: left;
+  font-family: var(--font-sans);
+}
+
+.col-rut { left: 0; width: 90px; min-width: 90px; max-width: 90px; }
+.col-nombre { left: 90px; width: 200px; min-width: 200px; max-width: 200px; overflow: hidden; text-overflow: ellipsis; }
+.col-area { left: 290px; width: 130px; min-width: 130px; max-width: 130px; box-shadow: 4px 0 6px -2px rgba(0,0,0,0.4); }
+
+.matriz-celda {
+  font-weight: 600;
+  min-width: 34px;
+}
+
+.matriz-ok { background: rgba(63,174,106,0.18); color: var(--ok); }
+.matriz-inconsistencia { background: rgba(233,162,59,0.22); color: var(--warn); }
+.matriz-ausente { background: rgba(214,84,79,0.22); color: var(--danger); }
+.matriz-ausencia { background: rgba(91,127,214,0.22); color: var(--turno-pm); }
+.matriz-futuro { background: transparent; color: var(--text-muted); }
+.matriz-diaLibre { background: rgba(139,150,168,0.15); color: var(--text-muted); }
+.matriz-diaLibreTrabajado { background: rgba(122,95,214,0.25); color: var(--turno-noche); }
+
+.matriz-dia-semana {
+  display: block;
+  font-size: 0.68rem;
+  font-weight: 600;
+  letter-spacing: 0.03em;
+  margin-bottom: 2px;
+}
+.matriz-dia-sabado { color: #5b9bd6; }
+.matriz-dia-domingo { color: var(--danger); }
+
 .empty-state {
   padding: 40px 20px;
   text-align: center;

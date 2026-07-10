@@ -55,6 +55,7 @@ async function initDb() {
       id SERIAL PRIMARY KEY,
       sem INTEGER,
       jefe_turno TEXT,
+      rotacion_base TEXT,
       dia TEXT,
       hora_entrada TEXT,
       hora_salida TEXT,
@@ -90,10 +91,62 @@ async function initDb() {
       minutos_atraso INTEGER,
       horas_trabajadas REAL,
       origen_entrada TEXT,
-      origen_salida TEXT
+      origen_salida TEXT,
+      entrada_talana TEXT,
+      salida_talana TEXT,
+      entrada_cencosud TEXT,
+      salida_cencosud TEXT,
+      diferencia_entrada_min INTEGER,
+      colacion_min INTEGER
     );
     CREATE INDEX IF NOT EXISTS idx_resultado_rut_fecha ON resultado_diario(rut, fecha);
+
+    CREATE TABLE IF NOT EXISTS areas_trabajo (
+      nombre TEXT PRIMARY KEY
+    );
+
+    CREATE TABLE IF NOT EXISTS log_marcacion (
+      id SERIAL PRIMARY KEY,
+      rut TEXT,
+      nombre TEXT,
+      fecha TEXT,
+      tipo_error TEXT,
+      detalle TEXT,
+      creado_en TIMESTAMP DEFAULT now()
+    );
+    CREATE INDEX IF NOT EXISTS idx_log_marcacion_fecha ON log_marcacion(fecha);
+
+    CREATE TABLE IF NOT EXISTS ausencias_permisos (
+      id SERIAL PRIMARY KEY,
+      rut TEXT NOT NULL,
+      fecha TEXT NOT NULL,
+      tipo TEXT NOT NULL,
+      observacion TEXT,
+      creado_en TIMESTAMP DEFAULT now(),
+      UNIQUE (rut, fecha)
+    );
+    CREATE INDEX IF NOT EXISTS idx_ausencias_rut_fecha ON ausencias_permisos(rut, fecha);
   `);
+
+  // Migración segura para bases creadas antes de agregar esta columna.
+  await pool.query('ALTER TABLE rotacion_turnos ADD COLUMN IF NOT EXISTS rotacion_base TEXT');
+  await pool.query(`
+    ALTER TABLE resultado_diario ADD COLUMN IF NOT EXISTS entrada_talana TEXT;
+    ALTER TABLE resultado_diario ADD COLUMN IF NOT EXISTS salida_talana TEXT;
+    ALTER TABLE resultado_diario ADD COLUMN IF NOT EXISTS entrada_cencosud TEXT;
+    ALTER TABLE resultado_diario ADD COLUMN IF NOT EXISTS salida_cencosud TEXT;
+    ALTER TABLE resultado_diario ADD COLUMN IF NOT EXISTS diferencia_entrada_min INTEGER;
+    ALTER TABLE resultado_diario ADD COLUMN IF NOT EXISTS colacion_min INTEGER;
+  `);
+
+  // Siembra inicial de áreas conocidas (no pisa nada si ya existen o si el
+  // usuario agregó/quitó áreas después).
+  const areasIniciales = [
+    'OSR-EMPAQUE', 'OSR-PUTWALL', 'SH1', 'SH2', 'SH3', 'INSUMOS', 'TRASPASO', 'RECEPCION',
+  ];
+  for (const area of areasIniciales) {
+    await pool.query('INSERT INTO areas_trabajo (nombre) VALUES ($1) ON CONFLICT (nombre) DO NOTHING', [area]);
+  }
 
   return pool;
 }

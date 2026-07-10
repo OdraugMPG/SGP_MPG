@@ -1,5 +1,5 @@
 import { useState } from 'react';
-import { importarArchivos } from '../api';
+import { importarArchivosConProgreso } from '../api';
 
 const CAMPOS = [
   { key: 'maestro', label: 'Maestro de Dotación', hint: '.xlsx' },
@@ -11,11 +11,13 @@ const CAMPOS = [
 
 export default function CargaArchivos({ onImportado }) {
   const [files, setFiles] = useState({});
-  const [cargando, setCargando] = useState(false);
+  const [progreso, setProgreso] = useState(null);
+  const [procesando, setProcesando] = useState(false);
   const [error, setError] = useState(null);
   const [resumen, setResumen] = useState(null);
 
   const todosListos = CAMPOS.every(c => files[c.key]);
+  const cargando = progreso !== null || procesando;
 
   function handleFile(key, fileList) {
     setFiles(prev => ({ ...prev, [key]: fileList[0] || null }));
@@ -25,16 +27,20 @@ export default function CargaArchivos({ onImportado }) {
 
   async function handleSubmit(e) {
     e.preventDefault();
-    setCargando(true);
     setError(null);
+    setProgreso(0);
     try {
-      const resumen = await importarArchivos(files);
+      const resumen = await importarArchivosConProgreso(files, (pct) => {
+        setProgreso(pct);
+        if (pct >= 100) setProcesando(true);
+      });
       setResumen(resumen);
       onImportado?.();
     } catch (err) {
       setError(err.message);
     } finally {
-      setCargando(false);
+      setProgreso(null);
+      setProcesando(false);
     }
   }
 
@@ -71,6 +77,25 @@ export default function CargaArchivos({ onImportado }) {
           )}
         </div>
       </form>
+
+      {progreso !== null && (
+        <div style={{ marginTop: 16, maxWidth: 400 }}>
+          <div style={{
+            height: 6, borderRadius: 4, background: 'var(--surface-2)',
+            border: '1px solid var(--border)', overflow: 'hidden',
+          }}>
+            <div style={{
+              height: '100%', width: `${progreso}%`,
+              background: 'var(--accent)', transition: 'width 0.15s ease',
+            }} />
+          </div>
+          <div style={{ marginTop: 6, fontSize: '0.75rem', color: 'var(--text-muted)' }}>
+            {progreso < 100
+              ? `Subiendo archivos… ${progreso}%`
+              : 'Archivos recibidos, procesando en el servidor…'}
+          </div>
+        </div>
+      )}
 
       {resumen && (
         <div className="summary-grid">
