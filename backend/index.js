@@ -8,8 +8,9 @@ const { initDb } = require('./db');
 const { cargarTodo, cargarTalanaIncremental, cargarCencosudIncremental } = require('./importar');
 const { calcularResultados } = require('./calcular');
 const { generarReporteDiario, exportarReporteDiarioXlsx, obtenerLogMarcacion } = require('./reporteDiario');
-const { generarDetalleMarcaciones } = require('./detallemarcaciones');
+const { generarDetalleMarcaciones } = require('./detalleMarcaciones');
 const { semanaISO, diaDeSemana, resolverJefeTurno } = require('./importar');
+const { login, requireAuth } = require('./auth');
 
 const app = express();
 app.use(cors());
@@ -22,6 +23,23 @@ let pool; // se inicializa al arrancar (ver bottom del archivo)
 app.get('/api/ping', (req, res) => {
   res.json({ message: 'Backend funcionando!' });
 });
+
+// Ruta pública: login. Debe ir ANTES del middleware requireAuth.
+app.post('/api/auth/login', async (req, res) => {
+  try {
+    const { usuario, password } = req.body;
+    if (!usuario || !password) return res.status(400).json({ error: 'Usuario y contraseña son requeridos' });
+    const resultado = await login(pool, usuario, password);
+    if (!resultado.ok) return res.status(401).json({ error: resultado.error });
+    res.json(resultado);
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// A partir de aquí, todas las rutas /api/* requieren un token válido.
+app.use('/api', requireAuth);
 
 app.post('/api/importar', upload.fields([
   { name: 'maestro', maxCount: 1 },

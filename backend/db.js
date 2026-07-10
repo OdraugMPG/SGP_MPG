@@ -1,4 +1,5 @@
 const { Pool } = require('pg');
+const bcrypt = require('bcryptjs');
 
 function crearPool() {
   return new Pool({
@@ -126,6 +127,16 @@ async function initDb() {
       UNIQUE (rut, fecha)
     );
     CREATE INDEX IF NOT EXISTS idx_ausencias_rut_fecha ON ausencias_permisos(rut, fecha);
+
+    CREATE TABLE IF NOT EXISTS usuarios (
+      id SERIAL PRIMARY KEY,
+      usuario TEXT UNIQUE NOT NULL,
+      password_hash TEXT NOT NULL,
+      nombre TEXT,
+      rol TEXT DEFAULT 'admin',
+      activo BOOLEAN DEFAULT true,
+      creado_en TIMESTAMP DEFAULT now()
+    );
   `);
 
   // Migración segura para bases creadas antes de agregar esta columna.
@@ -146,6 +157,21 @@ async function initDb() {
   ];
   for (const area of areasIniciales) {
     await pool.query('INSERT INTO areas_trabajo (nombre) VALUES ($1) ON CONFLICT (nombre) DO NOTHING', [area]);
+  }
+
+  // Usuario administrador inicial, creado desde variables de entorno.
+  // Si ya existe un usuario con ese nombre, no se hace nada (para no pisar
+  // una contraseña que ya haya sido cambiada manualmente).
+  if (process.env.ADMIN_USER && process.env.ADMIN_PASSWORD) {
+    const { rows: existe } = await pool.query('SELECT id FROM usuarios WHERE usuario = $1', [process.env.ADMIN_USER]);
+    if (existe.length === 0) {
+      const hash = await bcrypt.hash(process.env.ADMIN_PASSWORD, 10);
+      await pool.query(
+        `INSERT INTO usuarios (usuario, password_hash, nombre, rol) VALUES ($1,$2,$3,'admin')`,
+        [process.env.ADMIN_USER, hash, process.env.ADMIN_NOMBRE || 'Administrador']
+      );
+      console.log(`Usuario administrador "${process.env.ADMIN_USER}" creado.`);
+    }
   }
 
   return pool;

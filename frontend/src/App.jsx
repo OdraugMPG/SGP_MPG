@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useState, useEffect, useCallback } from 'react';
 import CargaArchivos from './components/CargaArchivos';
 import ActualizacionDiaria from './components/ActualizacionDiaria';
 import TablaResultados from './components/TablaResultados';
@@ -8,17 +8,51 @@ import PerfilTrabajador from './components/PerfilTrabajador';
 import AsignacionAusencias from './components/AsignacionAusencias';
 import DashboardAsistencia from './components/DashboardAsistencia';
 import DetalleMarcaciones from './components/DetalleMarcaciones';
+import Login from './components/Login';
+import { obtenerToken, obtenerUsuarioActual, cerrarSesion } from './api';
 import './index.css';
 
 export default function App() {
   const [tab, setTab] = useState('resultados');
   const [refrescarSenal, setRefrescarSenal] = useState(0);
+  const [usuario, setUsuario] = useState(() => (obtenerToken() ? obtenerUsuarioActual() : null));
+
+  const handleSesionInvalida = useCallback(() => {
+    setUsuario(null);
+  }, []);
+
+  useEffect(() => {
+    window.addEventListener('sgp:sesion-invalida', handleSesionInvalida);
+    return () => window.removeEventListener('sgp:sesion-invalida', handleSesionInvalida);
+  }, [handleSesionInvalida]);
+
+  function handleLogout() {
+    cerrarSesion();
+    setUsuario(null);
+  }
+
+  if (!usuario) {
+    return <Login onIngreso={setUsuario} />;
+  }
 
   return (
     <>
       <header className="app-header">
         <h1>SGP · Control de Asistencia</h1>
         <span className="subtitle">Talana / Cencosud — atrasos y horas trabajadas</span>
+        <div style={{ marginLeft: 'auto', display: 'flex', alignItems: 'center', gap: 14 }}>
+          <span style={{ color: 'var(--text-muted)', fontSize: '0.85rem' }}>{usuario.nombre || usuario.usuario}</span>
+          <button
+            type="button"
+            onClick={handleLogout}
+            style={{
+              background: 'transparent', border: '1px solid var(--border)', color: 'var(--text-muted)',
+              borderRadius: 8, padding: '6px 12px', fontSize: '0.8rem', cursor: 'pointer',
+            }}
+          >
+            Cerrar sesión
+          </button>
+        </div>
       </header>
 
       <nav className="tabs">
