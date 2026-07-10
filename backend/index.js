@@ -5,12 +5,13 @@ const path = require('path');
 require('dotenv').config();
 
 const { initDb } = require('./db');
-const { cargarTodo, cargarTalanaIncremental, cargarCencosudIncremental } = require('./importar');
+const { cargarTodo, cargarTalanaIncremental, cargarCencosudIncremental, activarEmpleadosDesdeArchivo } = require('./importar');
 const { calcularResultados } = require('./calcular');
 const { generarReporteDiario, exportarReporteDiarioXlsx, obtenerLogMarcacion } = require('./reporteDiario');
-const { generarDetalleMarcaciones } = require('./detalleMarcaciones');
+const { generarDetalleMarcaciones, exportarDetalleMarcacionesXlsx } = require('./detalleMarcaciones');
 const { semanaISO, diaDeSemana, resolverJefeTurno } = require('./importar');
-const { login, requireAuth } = require('./auth');
+const { login, requireAuth, requireAdmin } = require('./auth');
+const bcrypt = require('bcryptjs');
 
 const app = express();
 app.use(cors());
@@ -218,6 +219,20 @@ app.get('/api/detalle-marcaciones', async (req, res) => {
   }
 });
 
+app.get('/api/detalle-marcaciones/export', async (req, res) => {
+  try {
+    const { rut, desde, hasta } = req.query;
+    if (!desde || !hasta) return res.status(400).json({ error: 'desde y hasta son requeridos (YYYY-MM-DD)' });
+    const buffer = await exportarDetalleMarcacionesXlsx(pool, { rut, desde, hasta });
+    res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
+    res.setHeader('Content-Disposition', `attachment; filename="DetalleMarcaciones_${desde}_a_${hasta}.xlsx"`);
+    res.send(buffer);
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
 app.get('/api/dashboard-asistencia', async (req, res) => {
   try {
     const { desde, hasta, area } = req.query;
@@ -235,7 +250,7 @@ app.get('/api/dashboard-asistencia', async (req, res) => {
       fechas.push(d.toISOString().slice(0, 10));
     }
 
-    let sqlEmp = 'SELECT rut, nombre, apellido_paterno, cargo, centro_costo FROM empleados WHERE 1=1';
+    let sqlEmp = 'SELECT rut, nombre, apellido_paterno, cargo, centro_costo FROM empleados WHERE activo = true';
     const paramsEmp = [];
     if (area) { paramsEmp.push(area); sqlEmp += ` AND centro_costo = $${paramsEmp.length}`; }
     sqlEmp += ' ORDER BY nombre';
@@ -328,6 +343,101 @@ app.get('/api/dashboard-asistencia', async (req, res) => {
   } catch (err) {
     console.error(err);
     res.status(500).json({ error: err.message });
+  }
+});
+
+// --- Gestión de usuarios (solo administradores) ---
+
+app.get('/api/usuarios', requireAdmin, async (req, res) => {
+  try {
+    const { rows } = await pool.query(
+      'SELECT id, usuario, nombre, rol, activo, creado_en FROM usuarios ORDER BY creado_en'
+    );
+    res.json(rows);
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.post('/api/usuarios', requireAdmin, async (req, res) => {
+  try {
+    const { usuario, password, nombre, rol } = req.body;
+    if (!usuario || !password) return res.status(400).json({ error: 'usuario y password son requeridos' });
+    if (password.length < 6) return res.status(400).json({ error: 'La contraseña debe tener al menos 6 caracteres' });
+
+    const { rows: existe } = await pool.query('SELECT id FROM usuarios WHERE usuario = $1', [usuario]);
+    if (existe.length > 0) return res.status(409).json({ error: 'Ya existe un usuario con ese nombre' });
+
+    const hash = await bcrypt.hash(password, 10);
+    await pool.query(
+      `INSERT INTO usuarios (usuario, password_hash, nombre, rol) VALUES ($1,$2,$3,$4)`,
+      [usuario, hash, nombre || usuario, rol === 'admin' ? 'admin' : 'usuario']
+    );
+    res.json({ ok: true });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ ok: false, error: err.message });
+  }
+});
+
+app.put('/api/usuarios/:id', requireAdmin, async (req, res) => {
+  try {
+    const { nombre, rol, activo, password } = req.body;
+
+    if (password) {
+      if (password.length < 6) return res.status(400).json({ error: 'La contraseña debe tener al menos 6 caracteres' });
+      const hash = await bcrypt.hash(password, 10);
+      await pool.query('UPDATE usuarios SET password_hash = $1 WHERE id = $2', [hash, req.params.id]);
+    }
+
+    await pool.query(
+      `UPDATE usuarios SET
+         nombre = COALESCE($1, nombre),
+         rol = COALESCE($2, rol),
+         activo = COALESCE($3, activo)
+       WHERE id = $4`,
+      [nombre, rol, activo, req.params.id]
+    );
+    res.json({ ok: true });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ ok: false, error: err.message });
+  }
+});
+
+app.delete('/api/usuarios/:id', requireAdmin, async (req, res) => {
+  try {
+    if (String(req.usuario.id) === String(req.params.id)) {
+      return res.status(400).json({ error: 'No puedes eliminar tu propio usuario' });
+    }
+    await pool.query('DELETE FROM usuarios WHERE id = $1', [req.params.id]);
+    res.json({ ok: true });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ ok: false, error: err.message });
+  }
+});
+
+// Cualquier usuario logueado puede cambiar SU PROPIA contraseña.
+app.put('/api/usuarios/me/password', async (req, res) => {
+  try {
+    const { passwordActual, passwordNueva } = req.body;
+    if (!passwordActual || !passwordNueva) return res.status(400).json({ error: 'Faltan datos' });
+    if (passwordNueva.length < 6) return res.status(400).json({ error: 'La contraseña nueva debe tener al menos 6 caracteres' });
+
+    const { rows } = await pool.query('SELECT password_hash FROM usuarios WHERE id = $1', [req.usuario.id]);
+    if (rows.length === 0) return res.status(404).json({ error: 'Usuario no encontrado' });
+
+    const coincide = await bcrypt.compare(passwordActual, rows[0].password_hash);
+    if (!coincide) return res.status(401).json({ error: 'La contraseña actual no es correcta' });
+
+    const hash = await bcrypt.hash(passwordNueva, 10);
+    await pool.query('UPDATE usuarios SET password_hash = $1 WHERE id = $2', [hash, req.usuario.id]);
+    res.json({ ok: true });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ ok: false, error: err.message });
   }
 });
 
@@ -502,6 +612,18 @@ app.post('/api/empleados', async (req, res) => {
       [rut, nombre, apellido_paterno || '', apellido_materno || '', cargo || '', centro_costo || null]
     );
     res.json({ ok: true });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ ok: false, error: err.message });
+  }
+});
+
+// Marca activos/inactivos en masa a partir de un archivo con los RUTs vigentes.
+app.post('/api/empleados/activar-masivo', upload.single('activos'), async (req, res) => {
+  try {
+    if (!req.file) return res.status(400).json({ error: 'Falta el archivo con los RUTs vigentes' });
+    const resultado = await activarEmpleadosDesdeArchivo(pool, req.file.path);
+    res.json({ ok: true, ...resultado });
   } catch (err) {
     console.error(err);
     res.status(500).json({ ok: false, error: err.message });

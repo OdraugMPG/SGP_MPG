@@ -124,7 +124,7 @@ function horarioProgramado(rotacionMap, codigoJefeTurno, fecha) {
 }
 
 async function generarReporteDiario(pool, fecha) {
-  const { rows: empleados } = await pool.query('SELECT * FROM empleados');
+  const { rows: empleados } = await pool.query('SELECT * FROM empleados WHERE activo = true');
 
   // Se consultan también el día anterior y siguiente porque el turno Noche
   // cruza medianoche: la entrada puede estar el día anterior o la salida al
@@ -164,8 +164,6 @@ async function generarReporteDiario(pool, fecha) {
   const rotacionMap = new Map();
   for (const r of rotacionRows) rotacionMap.set(`${r.sem}|${r.jefe_turno}|${r.dia}`, r);
 
-  const { rows: contratoRows } = await pool.query('SELECT rut, razon_social FROM contrato_rut');
-  const razonSocialPorRut = new Map(contratoRows.map(c => [c.rut, c.razon_social]));
 
   const { rows: ausenciaRows } = await pool.query(
     'SELECT rut, tipo FROM ausencias_permisos WHERE fecha = $1', [fecha]
@@ -179,7 +177,7 @@ async function generarReporteDiario(pool, fecha) {
     const nombreCompleto = `${emp.nombre} ${emp.apellido_paterno || ''}`.trim();
     const codigoJefeTurno = jefeTurnoPorRut.get(emp.rut);
     const cencosud = cencosudPorRut.get(emp.rut);
-    const contrato = contratoDesdeRazonSocial(razonSocialPorRut.get(emp.rut)) || 'OUT';
+    const contrato = contratoDesdeRazonSocial(emp.empresa) || 'OUT';
 
     // Si hay una ausencia/permiso asignado para este día, se muestra la sigla
     // en vez de calcular horas desde Talana/Cencosud.

@@ -9,6 +9,7 @@ import AsignacionAusencias from './components/AsignacionAusencias';
 import DashboardAsistencia from './components/DashboardAsistencia';
 import DetalleMarcaciones from './components/DetalleMarcaciones';
 import Login from './components/Login';
+import GestionUsuarios from './components/GestionUsuarios';
 import { obtenerToken, obtenerUsuarioActual, cerrarSesion } from './api';
 import './index.css';
 
@@ -110,6 +111,12 @@ export default function App() {
         >
           Cargar planillas (5)
         </button>
+        <button
+          className={`tab-btn ${tab === 'usuarios' ? 'active' : ''}`}
+          onClick={() => setTab('usuarios')}
+        >
+          Usuarios
+        </button>
       </nav>
 
       <main>
@@ -124,6 +131,7 @@ export default function App() {
         {tab === 'asignacion' && <AsignacionJefeTurno />}
         {tab === 'perfiles' && <PerfilTrabajador />}
         {tab === 'ausencias' && <AsignacionAusencias />}
+        {tab === 'usuarios' && <GestionUsuarios usuarioActual={usuario} />}
       </main>
     </>
   );

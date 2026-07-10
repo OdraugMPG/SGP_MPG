@@ -45,4 +45,13 @@ function requireAuth(req, res, next) {
   }
 }
 
-module.exports = { login, requireAuth };
+// Middleware adicional: exige que el usuario autenticado tenga rol 'admin'.
+// Debe usarse DESPUÉS de requireAuth (necesita req.usuario ya seteado).
+function requireAdmin(req, res, next) {
+  if (!req.usuario || req.usuario.rol !== 'admin') {
+    return res.status(403).json({ error: 'Solo un administrador puede realizar esta acción' });
+  }
+  next();
+}
+
+module.exports = { login, requireAuth, requireAdmin };

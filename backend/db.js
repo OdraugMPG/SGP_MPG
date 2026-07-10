@@ -28,7 +28,8 @@ async function initDb() {
       fecha_ingreso TEXT,
       turno_texto TEXT,
       jefe TEXT,
-      vigente TEXT
+      vigente TEXT,
+      activo BOOLEAN DEFAULT true
     );
 
     CREATE TABLE IF NOT EXISTS marcaciones_talana (
@@ -149,6 +150,7 @@ async function initDb() {
     ALTER TABLE resultado_diario ADD COLUMN IF NOT EXISTS diferencia_entrada_min INTEGER;
     ALTER TABLE resultado_diario ADD COLUMN IF NOT EXISTS colacion_min INTEGER;
   `);
+  await pool.query('ALTER TABLE empleados ADD COLUMN IF NOT EXISTS activo BOOLEAN DEFAULT true');
 
   // Siembra inicial de áreas conocidas (no pisa nada si ya existen o si el
   // usuario agregó/quitó áreas después).

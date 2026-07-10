@@ -228,7 +228,7 @@ function parseAsignacion(path) {
 // Mapeo de Razón Social (columna C de DB_Talana) a la sigla de contrato que va en el reporte final
 const CONTRATO_POR_RAZON_SOCIAL = {
   'Manpower Servicios Integrales SpA.': 'OUT',
-  'Manpower Empresa de Servicios Transitorios Ltda.': 'EST',
+  'Manpower Empresa de Servicios Transitorios Ltda.': 'SSTT',
 };
 
 function contratoDesdeRazonSocial(razonSocial) {
@@ -428,10 +428,41 @@ async function cargarCencosudIncremental(pool, path) {
   return { fechas, filas: marcaciones.length };
 }
 
+// Marca como activos SOLO los RUTs que vienen en el archivo (una columna con
+// los RUTs vigentes), y como inactivos a todos los demás. Acepta un archivo
+// con encabezado 'RUT' (recomendado) o, si no lo encuentra, usa la primera
+// columna de la primera hoja.
+async function activarEmpleadosDesdeArchivo(pool, path) {
+  const wb = leerHojas(path);
+  const ws = wb.Sheets[wb.SheetNames[0]];
+  const rows = XLSX.utils.sheet_to_json(ws, { defval: null });
+
+  let ruts;
+  if (rows.length > 0 && ('RUT' in rows[0] || 'Rut' in rows[0] || 'rut' in rows[0])) {
+    const clave = 'RUT' in rows[0] ? 'RUT' : ('Rut' in rows[0] ? 'Rut' : 'rut');
+    ruts = rows.map(r => limpiarRut(r[clave]));
+  } else {
+    // sin encabezado reconocible: usa la primera columna de cada fila
+    ruts = rows.map(r => limpiarRut(Object.values(r)[0]));
+  }
+  ruts = [...new Set(ruts.filter(Boolean))];
+
+  const { rows: resultado } = await pool.query(
+    `UPDATE empleados SET activo = (rut = ANY($1::text[])) RETURNING rut, activo`,
+    [ruts]
+  );
+
+  const activados = resultado.filter(r => r.activo).length;
+  const desactivados = resultado.filter(r => !r.activo).length;
+
+  return { ruts_en_archivo: ruts.length, activados, desactivados, total: resultado.length };
+}
+
 module.exports = {
   parseTalana, parseCencosud, parseMaestro, parseRotacion, parseAsignacion,
   cargarTodo, cargarTalanaIncremental, cargarCencosudIncremental,
   diaDeSemana, semanaISO, resolverJefeTurno, toFechaISO, toHoraStr,
   contratoDesdeRazonSocial, sumarDias, fusionarTurnosNocturnos, limpiarRut,
+  activarEmpleadosDesdeArchivo,
   determinarTipoTurno, minutosAjusteColacion,
 };

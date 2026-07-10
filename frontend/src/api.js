@@ -152,6 +152,13 @@ export async function obtenerDetalleMarcaciones(filtros) {
   return data;
 }
 
+export function urlDescargaDetalleMarcaciones(filtros) {
+  const params = new URLSearchParams();
+  Object.entries(filtros).forEach(([k, v]) => { if (v) params.append(k, v); });
+  params.append('token', obtenerToken() || '');
+  return `${API_URL}/api/detalle-marcaciones/export?${params.toString()}`;
+}
+
 export async function obtenerDashboardAsistencia(desde, hasta, area) {
   const params = new URLSearchParams({ desde, hasta });
   if (area) params.append('area', area);
@@ -305,6 +312,67 @@ export async function eliminarArea(nombre) {
   const res = await authFetch(`${API_URL}/api/areas/${encodeURIComponent(nombre)}`, { method: 'DELETE' });
   const data = await res.json();
   if (!res.ok || !data.ok) throw new Error(data.error || 'Error al eliminar el área');
+  return data;
+}
+
+// --- Gestión de usuarios ---
+
+export async function listarUsuarios() {
+  const res = await authFetch(`${API_URL}/api/usuarios`);
+  const data = await res.json();
+  if (!res.ok) throw new Error(data.error || 'Error al listar usuarios');
+  return data;
+}
+
+export async function crearUsuario(datos) {
+  const res = await authFetch(`${API_URL}/api/usuarios`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(datos),
+  });
+  const data = await res.json();
+  if (!res.ok || !data.ok) throw new Error(data.error || 'Error al crear el usuario');
+  return data;
+}
+
+export async function actualizarUsuario(id, datos) {
+  const res = await authFetch(`${API_URL}/api/usuarios/${id}`, {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(datos),
+  });
+  const data = await res.json();
+  if (!res.ok || !data.ok) throw new Error(data.error || 'Error al actualizar el usuario');
+  return data;
+}
+
+export async function eliminarUsuario(id) {
+  const res = await authFetch(`${API_URL}/api/usuarios/${id}`, { method: 'DELETE' });
+  const data = await res.json();
+  if (!res.ok || !data.ok) throw new Error(data.error || 'Error al eliminar el usuario');
+  return data;
+}
+
+export async function cambiarMiPassword(passwordActual, passwordNueva) {
+  const res = await authFetch(`${API_URL}/api/usuarios/me/password`, {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ passwordActual, passwordNueva }),
+  });
+  const data = await res.json();
+  if (!res.ok || !data.ok) throw new Error(data.error || 'Error al cambiar la contraseña');
+  return data;
+}
+
+export async function activarEmpleadosMasivo(file) {
+  const formData = new FormData();
+  formData.append('activos', file);
+  const res = await authFetch(`${API_URL}/api/empleados/activar-masivo`, {
+    method: 'POST',
+    body: formData,
+  });
+  const data = await res.json();
+  if (!res.ok || !data.ok) throw new Error(data.error || 'Error al actualizar el estado de los trabajadores');
   return data;
 }
 
