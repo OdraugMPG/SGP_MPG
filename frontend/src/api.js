@@ -124,17 +124,31 @@ export async function obtenerResultados(filtros) {
   return res.json();
 }
 
-export async function obtenerReporteDiario(fecha) {
-  const res = await authFetch(`${API_URL}/api/reporte-diario?fecha=${fecha}`);
+export async function obtenerReporteDiario(fecha, excluirAreas = []) {
+  const params = new URLSearchParams({ fecha });
+  if (excluirAreas.length > 0) params.append('excluirAreas', excluirAreas.join(','));
+  const res = await authFetch(`${API_URL}/api/reporte-diario?${params.toString()}`);
   if (!res.ok) throw new Error('Error al consultar el reporte diario');
   return res.json();
 }
 
 // La descarga del Excel es un link directo (<a href>), así que el token va
 // como query param en vez de header (no se puede setear header en una navegación).
-export function urlDescargaReporteDiario(fecha) {
+export function urlDescargaReporteDiario(fecha, excluirAreas = []) {
   const token = obtenerToken();
-  return `${API_URL}/api/reporte-diario/export?fecha=${fecha}&token=${encodeURIComponent(token || '')}`;
+  const params = new URLSearchParams({ fecha, token: token || '' });
+  if (excluirAreas.length > 0) params.append('excluirAreas', excluirAreas.join(','));
+  return `${API_URL}/api/reporte-diario/export?${params.toString()}`;
+}
+
+export function urlDescargaReporteEmpleadoPDF(rut, mes) {
+  const params = new URLSearchParams({ mes, token: obtenerToken() || '' });
+  return `${API_URL}/api/reporte-empleado/${encodeURIComponent(rut)}/pdf?${params.toString()}`;
+}
+
+export function urlDescargaReportePorJefeTurnoPDF(jefeTurno, mes) {
+  const params = new URLSearchParams({ jefeTurno, mes, token: obtenerToken() || '' });
+  return `${API_URL}/api/reporte-jefe-turno/pdf?${params.toString()}`;
 }
 
 export async function obtenerLogMarcacion(fecha) {
@@ -159,6 +173,21 @@ export function urlDescargaDetalleMarcaciones(filtros) {
   return `${API_URL}/api/detalle-marcaciones/export?${params.toString()}`;
 }
 
+export async function obtenerIndicadores(desde, hasta, area) {
+  const params = new URLSearchParams({ desde, hasta });
+  if (area) params.append('area', area);
+  const res = await authFetch(`${API_URL}/api/indicadores?${params.toString()}`);
+  const data = await res.json();
+  if (!res.ok) throw new Error(data.error || 'Error al cargar los indicadores');
+  return data;
+}
+
+export function urlDescargaReporteDesvinculacion(desde, hasta, area) {
+  const params = new URLSearchParams({ desde, hasta, token: obtenerToken() || '' });
+  if (area) params.append('area', area);
+  return `${API_URL}/api/indicadores/reporte-desvinculacion/export?${params.toString()}`;
+}
+
 export async function obtenerDashboardAsistencia(desde, hasta, area) {
   const params = new URLSearchParams({ desde, hasta });
   if (area) params.append('area', area);
@@ -166,6 +195,12 @@ export async function obtenerDashboardAsistencia(desde, hasta, area) {
   const data = await res.json();
   if (!res.ok) throw new Error(data.error || 'Error al cargar el dashboard');
   return data;
+}
+
+export function urlDescargaDashboardAsistencia(desde, hasta, area) {
+  const params = new URLSearchParams({ desde, hasta, token: obtenerToken() || '' });
+  if (area) params.append('area', area);
+  return `${API_URL}/api/dashboard-asistencia/export?${params.toString()}`;
 }
 
 // --- Ausencias y permisos ---
@@ -315,6 +350,53 @@ export async function eliminarArea(nombre) {
   return data;
 }
 
+// --- Requerimiento de dotación por cargo ---
+
+export async function listarRequerimientoDotacion(cargo) {
+  const params = cargo ? `?cargo=${encodeURIComponent(cargo)}` : '';
+  const res = await authFetch(`${API_URL}/api/requerimiento-dotacion${params}`);
+  const data = await res.json();
+  if (!res.ok) throw new Error(data.error || 'Error al listar el requerimiento de dotación');
+  return data;
+}
+
+export async function crearRequerimientoDotacion(datos) {
+  const res = await authFetch(`${API_URL}/api/requerimiento-dotacion`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(datos),
+  });
+  const data = await res.json();
+  if (!res.ok || !data.ok) throw new Error(data.error || 'Error al registrar el requerimiento');
+  return data;
+}
+
+export async function eliminarRequerimientoDotacion(id) {
+  const res = await authFetch(`${API_URL}/api/requerimiento-dotacion/${id}`, { method: 'DELETE' });
+  const data = await res.json();
+  if (!res.ok || !data.ok) throw new Error(data.error || 'Error al eliminar el registro');
+  return data;
+}
+
+export async function listarRequerimientoDotacionVigente(fecha) {
+  const params = fecha ? `?fecha=${fecha}` : '';
+  const res = await authFetch(`${API_URL}/api/requerimiento-dotacion/vigente${params}`);
+  const data = await res.json();
+  if (!res.ok) throw new Error(data.error || 'Error al consultar el requerimiento vigente');
+  return data;
+}
+
+export async function guardarRequerimientoDotacionMasivo(datos) {
+  const res = await authFetch(`${API_URL}/api/requerimiento-dotacion/masivo`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(datos),
+  });
+  const data = await res.json();
+  if (!res.ok || !data.ok) throw new Error(data.error || 'Error al guardar la matriz de requerimiento');
+  return data;
+}
+
 // --- Gestión de usuarios ---
 
 export async function listarUsuarios() {
@@ -374,6 +456,52 @@ export async function activarEmpleadosMasivo(file) {
   const data = await res.json();
   if (!res.ok || !data.ok) throw new Error(data.error || 'Error al actualizar el estado de los trabajadores');
   return data;
+}
+
+export async function actualizarAreasMasivo(file) {
+  const formData = new FormData();
+  formData.append('areas', file);
+  const res = await authFetch(`${API_URL}/api/empleados/areas-masivo`, {
+    method: 'POST',
+    body: formData,
+  });
+  const data = await res.json();
+  if (!res.ok || !data.ok) throw new Error(data.error || 'Error al actualizar las áreas');
+  return data;
+}
+
+export async function listarParentescosFallecimiento() {
+  const res = await authFetch(`${API_URL}/api/ausencias/fallecimiento/parentescos`);
+  if (!res.ok) throw new Error('Error al listar parentescos');
+  return res.json();
+}
+
+export async function calcularFechaFinFallecimiento(fechaInicio, parentesco, rut) {
+  const params = new URLSearchParams({ fecha_inicio: fechaInicio, parentesco });
+  if (rut) params.append('rut', rut);
+  const res = await authFetch(`${API_URL}/api/ausencias/fallecimiento/calcular?${params.toString()}`);
+  const data = await res.json();
+  if (!res.ok) throw new Error(data.error || 'Error al calcular la fecha de término');
+  return data;
+}
+
+export async function registrarAusenciaEnRango(datos) {
+  // datos: { rut, tipo, fecha_inicio, fecha_fin?, parentesco?, observacion?, documento? (File) }
+  const formData = new FormData();
+  Object.entries(datos).forEach(([k, v]) => {
+    if (v !== undefined && v !== null && v !== '') formData.append(k, v);
+  });
+  const res = await authFetch(`${API_URL}/api/ausencias/rango`, {
+    method: 'POST',
+    body: formData,
+  });
+  const data = await res.json();
+  if (!res.ok || !data.ok) throw new Error(data.error || 'Error al registrar el permiso');
+  return data;
+}
+
+export function urlDescargaDocumentoAusencia(documentoId) {
+  return `${API_URL}/api/ausencias/documento/${documentoId}?token=${encodeURIComponent(obtenerToken() || '')}`;
 }
 
 // --- Perfil de trabajador ---

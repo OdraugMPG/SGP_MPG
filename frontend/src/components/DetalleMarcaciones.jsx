@@ -88,6 +88,7 @@ export default function DetalleMarcaciones() {
               <th>Horas Extras</th>
               <th>Entrada MPG vs CENCOSUD</th>
               <th>Salida MPG vs CENCOSUD</th>
+              <th>Horas Trabajadas MPG vs CENCOSUD</th>
             </tr>
           </thead>
           <tbody>
@@ -109,6 +110,7 @@ export default function DetalleMarcaciones() {
                 <td>{f.horas_extras_cencosud ?? '—'}</td>
                 <td>{celdaDiferencia(f.diferencia_entrada_min)}</td>
                 <td>{celdaDiferencia(f.diferencia_salida_min)}</td>
+                <td>{celdaDiferencia(f.diferencia_horas_trabajadas)}</td>
               </tr>
             ))}
           </tbody>

@@ -1,6 +1,14 @@
 import { useEffect, useState, useCallback } from 'react';
 import { obtenerResultados } from '../api';
 
+const OPCIONES_JEFE_TURNO = [
+  { value: '', label: 'Todos' },
+  { value: 'T_RD', label: 'T_RD' },
+  { value: 'T_BV', label: 'T_BV' },
+  { value: 'T_WP', label: 'T_WP (Noche)' },
+  { value: 'CG', label: 'Plano (CG)' },
+];
+
 function claseAtraso(min) {
   if (min === null || min === undefined) return '';
   if (min <= 0) return '';
@@ -10,17 +18,19 @@ function claseAtraso(min) {
 
 function BadgeInconsistencia({ valor }) {
   if (!valor) return <span className="badge badge-ok">OK</span>;
-  const esTalana = valor.toLowerCase().includes('talana');
+  // 'Marcó en Talana pero no en Cencosud' -> falta la marca de Cencosud
+  // 'Marcó en Cencosud pero no en Talana' -> falta la marca de Talana
+  const marcoSoloTalana = valor.startsWith('Marcó en Talana');
   return (
     <span className="badge badge-danger" title={valor}>
-      {esTalana ? 'Sin marca Cencosud' : 'Sin marca Talana'}
+      {marcoSoloTalana ? 'Sin marca Cencosud' : 'Sin marca Talana'}
     </span>
   );
 }
 
 export default function TablaResultados({ refrescarSenal }) {
   const [filtros, setFiltros] = useState({
-    rut: '', desde: '', hasta: '', soloAtrasos: false, soloInconsistencias: false,
+    rut: '', desde: '', hasta: '', soloAtrasos: false, soloInconsistencias: false, jefeTurno: '',
   });
   const [datos, setDatos] = useState([]);
   const [cargando, setCargando] = useState(false);
@@ -36,6 +46,7 @@ export default function TablaResultados({ refrescarSenal }) {
         hasta: filtros.hasta || undefined,
         soloAtrasos: filtros.soloAtrasos ? 'true' : undefined,
         soloInconsistencias: filtros.soloInconsistencias ? 'true' : undefined,
+        jefeTurno: filtros.jefeTurno || undefined,
       });
       setDatos(res);
     } catch (err) {
@@ -77,6 +88,16 @@ export default function TablaResultados({ refrescarSenal }) {
             value={filtros.hasta}
             onChange={e => setFiltros(f => ({ ...f, hasta: e.target.value }))}
           />
+        </div>
+        <div className="field">
+          <label>Jefe de Turno</label>
+          <select
+            value={filtros.jefeTurno}
+            onChange={e => setFiltros(f => ({ ...f, jefeTurno: e.target.value }))}
+            style={{ background: 'var(--surface-2)', border: '1px solid var(--border)', borderRadius: 8, padding: '8px 10px', color: 'var(--text)', fontSize: '0.82rem' }}
+          >
+            {OPCIONES_JEFE_TURNO.map(o => <option key={o.value} value={o.value}>{o.label}</option>)}
+          </select>
         </div>
         <label className="checkbox-field">
           <input

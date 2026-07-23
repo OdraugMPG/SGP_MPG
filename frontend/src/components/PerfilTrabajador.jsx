@@ -1,8 +1,111 @@
 import { useState, useEffect, useCallback } from 'react';
 import {
   buscarEmpleados, crearEmpleado, actualizarEmpleado,
-  listarAreas, crearArea, eliminarArea, listarCargos,
+  listarAreas, crearArea, eliminarArea, listarCargos, activarEmpleadosMasivo, actualizarAreasMasivo,
 } from '../api';
+
+function PanelActualizacionAreas({ onCambio }) {
+  const [file, setFile] = useState(null);
+  const [cargando, setCargando] = useState(false);
+  const [error, setError] = useState(null);
+  const [resultado, setResultado] = useState(null);
+
+  async function procesar() {
+    if (!file) return;
+    setCargando(true);
+    setError(null);
+    setResultado(null);
+    try {
+      const data = await actualizarAreasMasivo(file);
+      setResultado(data);
+      setFile(null);
+      onCambio?.();
+    } catch (err) {
+      setError(err.message);
+    } finally {
+      setCargando(false);
+    }
+  }
+
+  return (
+    <div className="card" style={{ marginBottom: 20 }}>
+      <h2>Actualizar áreas (masivo)</h2>
+      <p className="card-desc">
+        Sube un archivo con columnas <strong>RUT</strong> y <strong>ÁREA</strong>. Se actualiza el
+        área solo de los trabajadores que estén en el archivo; las áreas nuevas se agregan
+        automáticamente a la lista de arriba.
+      </p>
+      <div style={{ display: 'flex', gap: 10, alignItems: 'center', flexWrap: 'wrap' }}>
+        <input
+          type="file" accept=".xlsx,.xlsm,.xls"
+          className={`file-input ${file ? 'filled' : ''}`}
+          style={{ maxWidth: 320 }}
+          onChange={e => { setFile(e.target.files[0] || null); setResultado(null); setError(null); }}
+        />
+        <button className="btn" type="button" disabled={!file || cargando} onClick={procesar}>
+          {cargando ? 'Procesando…' : 'Actualizar áreas'}
+        </button>
+      </div>
+      {error && <p className="status-msg error" style={{ marginTop: 10 }}>{error}</p>}
+      {resultado && (
+        <p className="status-msg ok" style={{ marginTop: 10 }}>
+          ✓ {resultado.filas_en_archivo} filas en el archivo · {resultado.actualizados} trabajadores actualizados · {resultado.areas_nuevas} área(s) nueva(s) agregada(s)
+        </p>
+      )}
+    </div>
+  );
+}
+
+function PanelActivacionMasiva() {
+  const [file, setFile] = useState(null);
+  const [cargando, setCargando] = useState(false);
+  const [error, setError] = useState(null);
+  const [resultado, setResultado] = useState(null);
+
+  async function procesar() {
+    if (!file) return;
+    setCargando(true);
+    setError(null);
+    setResultado(null);
+    try {
+      const data = await activarEmpleadosMasivo(file);
+      setResultado(data);
+      setFile(null);
+    } catch (err) {
+      setError(err.message);
+    } finally {
+      setCargando(false);
+    }
+  }
+
+  return (
+    <div className="card" style={{ marginBottom: 20 }}>
+      <h2>Actualizar trabajadores activos/inactivos (masivo)</h2>
+      <p className="card-desc">
+        Sube un archivo con la lista de RUTs actualmente vigentes (columna "RUT" recomendada).
+        Los que estén en el archivo quedan <strong>activos</strong>; todos los demás pasan a{' '}
+        <strong>inactivos</strong> y dejan de aparecer en Dashboard y Reporte Diario.
+      </p>
+      <div style={{ display: 'flex', gap: 10, alignItems: 'center', flexWrap: 'wrap' }}>
+        <input
+          type="file" accept=".xlsx,.xlsm,.xls"
+          className={`file-input ${file ? 'filled' : ''}`}
+          style={{ maxWidth: 320 }}
+          onChange={e => { setFile(e.target.files[0] || null); setResultado(null); setError(null); }}
+        />
+        <button className="btn" type="button" disabled={!file || cargando} onClick={procesar}>
+          {cargando ? 'Procesando…' : 'Actualizar estados'}
+        </button>
+      </div>
+      {error && <p className="status-msg error" style={{ marginTop: 10 }}>{error}</p>}
+      {resultado && (
+        <p className="status-msg ok" style={{ marginTop: 10 }}>
+          ✓ {resultado.ruts_en_archivo} RUTs en el archivo · {resultado.activados} activos · {resultado.desactivados} inactivos (de {resultado.total} trabajadores en total)
+        </p>
+      )}
+    </div>
+  );
+}
 
 function FormularioEdicion({ empleado, areas, cargos, onGuardado, onCancelar }) {
   const [form, setForm] = useState({
@@ -11,11 +114,18 @@ function FormularioEdicion({ empleado, areas, cargos, onGuardado, onCancelar }) 
     apellido_materno: empleado.apellido_materno || '',
     cargo: empleado.cargo || '',
     centro_costo: empleado.centro_costo || '',
+    activo: empleado.activo !== false,
+    motivo_inactivo: empleado.motivo_inactivo || '',
+    tipo_contrato: empleado.tipo_contrato_efectivo || empleado.tipo_contrato || 'OUT',
   });
   const [guardando, setGuardando] = useState(false);
   const [error, setError] = useState(null);
 
   async function guardar() {
+    if (!form.activo && !form.motivo_inactivo.trim()) {
+      setError('Debes indicar el motivo por el que queda inactivo.');
+      return;
+    }
     setGuardando(true);
     setError(null);
     try {
@@ -30,7 +140,7 @@ function FormularioEdicion({ empleado, areas, cargos, onGuardado, onCancelar }) 
 
   return (
     <tr>
-      <td colSpan={6} style={{ background: 'var(--surface-2)', padding: 16 }}>
+      <td colSpan={7} style={{ background: 'var(--surface-2)', padding: 16 }}>
         <div className="field-grid" style={{ marginBottom: 12 }}>
           <div className="field">
             <label>Nombre</label>
@@ -63,6 +173,36 @@ function FormularioEdicion({ empleado, areas, cargos, onGuardado, onCancelar }) 
               {areas.map(a => <option key={a} value={a}>{a}</option>)}
             </select>
           </div>
+          <div className="field">
+            <label>Tipo de contrato</label>
+            <select value={form.tipo_contrato} onChange={e => setForm(f => ({ ...f, tipo_contrato: e.target.value }))}
+              style={{ width: '100%', background: 'var(--surface)', border: '1px solid var(--border)', borderRadius: 6, padding: '7px 9px', color: 'var(--text)' }}>
+              <option value="OUT">OUT</option>
+              <option value="SSTT">SSTT</option>
+            </select>
+          </div>
+          <div className="field">
+            <label>Estado</label>
+            <select
+              value={form.activo ? 'activo' : 'inactivo'}
+              onChange={e => setForm(f => ({ ...f, activo: e.target.value === 'activo', motivo_inactivo: e.target.value === 'activo' ? '' : f.motivo_inactivo }))}
+              style={{ width: '100%', background: 'var(--surface)', border: '1px solid var(--border)', borderRadius: 6, padding: '7px 9px', color: 'var(--text)' }}
+            >
+              <option value="activo">Activo</option>
+              <option value="inactivo">Inactivo</option>
+            </select>
+          </div>
+          {!form.activo && (
+            <div className="field">
+              <label>Motivo de inactividad</label>
+              <input
+                type="text" value={form.motivo_inactivo}
+                onChange={e => setForm(f => ({ ...f, motivo_inactivo: e.target.value }))}
+                placeholder="Ej: Renuncia voluntaria, término de contrato, desvinculación..."
+                style={{ width: '100%', background: 'var(--surface)', border: '1px solid var(--border)', borderRadius: 6, padding: '7px 9px', color: 'var(--text)' }}
+              />
+            </div>
+          )}
         </div>
         {error && <p className="status-msg error">{error}</p>}
         <div style={{ display: 'flex', gap: 10 }}>
@@ -265,6 +405,8 @@ export default function PerfilTrabajador() {
 
   return (
     <>
+      <PanelActivacionMasiva />
+      <PanelActualizacionAreas onCambio={cargarAreas} />
       <PanelAreas areas={areas} onCambio={cargarAreas} />
 
       {mostrarCreacion && (
@@ -303,6 +445,8 @@ export default function PerfilTrabajador() {
                   <th>Nombre</th>
                   <th>Cargo</th>
                   <th>Área</th>
+                  <th>Contrato</th>
+                  <th>Estado</th>
                   <th></th>
                 </tr>
               </thead>
@@ -323,6 +467,12 @@ export default function PerfilTrabajador() {
                       <td style={{ fontFamily: 'var(--font-sans)' }}>{emp.nombre} {emp.apellido_paterno}</td>
                       <td style={{ fontFamily: 'var(--font-sans)' }}>{emp.cargo}</td>
                       <td>{emp.centro_costo || <span className="badge badge-muted">Sin área</span>}</td>
+                      <td>{emp.tipo_contrato_efectivo || '—'}</td>
+                      <td>
+                        {emp.activo === false
+                          ? <span className="badge badge-danger" title={emp.motivo_inactivo || ''}>Inactivo</span>
+                          : <span className="badge badge-ok">Activo</span>}
+                      </td>
                       <td>
                         <button
                           type="button" className="btn"
@@ -336,7 +486,7 @@ export default function PerfilTrabajador() {
                   )
                 ))}
                 {!buscando && resultados.length === 0 && (
-                  <tr><td colSpan={5} className="empty-state">Sin resultados.</td></tr>
+                  <tr><td colSpan={7} className="empty-state">Sin resultados.</td></tr>
                 )}
               </tbody>
             </table>

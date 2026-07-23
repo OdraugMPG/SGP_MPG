@@ -129,6 +129,21 @@ async function initDb() {
     );
     CREATE INDEX IF NOT EXISTS idx_ausencias_rut_fecha ON ausencias_permisos(rut, fecha);
 
+    CREATE TABLE IF NOT EXISTS documentos_respaldo (
+      id SERIAL PRIMARY KEY,
+      rut TEXT,
+      fecha_inicio TEXT,
+      fecha_fin TEXT,
+      tipo TEXT,
+      parentesco TEXT,
+      nombre_archivo TEXT,
+      mime_tipo TEXT,
+      contenido BYTEA,
+      observacion TEXT,
+      creado_por TEXT,
+      creado_en TIMESTAMP DEFAULT now()
+    );
+
     CREATE TABLE IF NOT EXISTS usuarios (
       id SERIAL PRIMARY KEY,
       usuario TEXT UNIQUE NOT NULL,
@@ -136,6 +151,17 @@ async function initDb() {
       nombre TEXT,
       rol TEXT DEFAULT 'admin',
       activo BOOLEAN DEFAULT true,
+      creado_en TIMESTAMP DEFAULT now()
+    );
+
+    CREATE TABLE IF NOT EXISTS requerimiento_dotacion (
+      id SERIAL PRIMARY KEY,
+      cargo TEXT NOT NULL,
+      turno TEXT,
+      cantidad_requerida INTEGER NOT NULL,
+      vigente_desde TEXT NOT NULL,
+      observacion TEXT,
+      creado_por TEXT,
       creado_en TIMESTAMP DEFAULT now()
     );
   `);
@@ -150,7 +176,31 @@ async function initDb() {
     ALTER TABLE resultado_diario ADD COLUMN IF NOT EXISTS diferencia_entrada_min INTEGER;
     ALTER TABLE resultado_diario ADD COLUMN IF NOT EXISTS colacion_min INTEGER;
   `);
+  // Limpia duplicados que hayan quedado de antes (se queda con la fila de
+  // mayor id, la más reciente, para cada rut+fecha), y agrega una restricción
+  // que impide que se vuelvan a crear duplicados en el futuro.
+  await pool.query(`
+    DELETE FROM resultado_diario a USING resultado_diario b
+    WHERE a.id < b.id AND a.rut = b.rut AND a.fecha = b.fecha
+  `);
+  await pool.query(`
+    DO $$
+    BEGIN
+      IF NOT EXISTS (
+        SELECT 1 FROM pg_constraint WHERE conname = 'resultado_diario_rut_fecha_key'
+      ) THEN
+        ALTER TABLE resultado_diario ADD CONSTRAINT resultado_diario_rut_fecha_key UNIQUE (rut, fecha);
+      END IF;
+    END $$;
+  `);
+
   await pool.query('ALTER TABLE empleados ADD COLUMN IF NOT EXISTS activo BOOLEAN DEFAULT true');
+  await pool.query('ALTER TABLE empleados ADD COLUMN IF NOT EXISTS motivo_inactivo TEXT');
+  await pool.query('ALTER TABLE empleados ADD COLUMN IF NOT EXISTS tipo_contrato TEXT');
+  await pool.query('ALTER TABLE requerimiento_dotacion ADD COLUMN IF NOT EXISTS turno TEXT');
+  await pool.query('ALTER TABLE ausencias_permisos ADD COLUMN IF NOT EXISTS documento_id INTEGER REFERENCES documentos_respaldo(id)');
+  await pool.query('ALTER TABLE ausencias_permisos ADD COLUMN IF NOT EXISTS parentesco TEXT');
+  await pool.query('CREATE INDEX IF NOT EXISTS idx_requerimiento_cargo_fecha ON requerimiento_dotacion(cargo, turno, vigente_desde)');
 
   // Siembra inicial de áreas conocidas (no pisa nada si ya existen o si el
   // usuario agregó/quitó áreas después).

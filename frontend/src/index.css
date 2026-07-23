@@ -297,6 +297,27 @@ tbody tr:hover { background: var(--surface-2); }
   max-height: 70vh;
   border: 1px solid var(--border);
   border-radius: 8px;
+  scrollbar-width: auto;
+  scrollbar-color: var(--accent) var(--surface-2);
+}
+
+.matriz-scroll::-webkit-scrollbar {
+  height: 14px;
+  width: 14px;
+}
+
+.matriz-scroll::-webkit-scrollbar-track {
+  background: var(--surface-2);
+}
+
+.matriz-scroll::-webkit-scrollbar-thumb {
+  background: var(--accent);
+  border-radius: 8px;
+  border: 3px solid var(--surface-2);
+}
+
+.matriz-scroll::-webkit-scrollbar-thumb:hover {
+  background: var(--accent-strong);
 }
 
 .matriz-table {
@@ -332,7 +353,9 @@ tbody tr:hover { background: var(--surface-2); }
 
 .col-rut { left: 0; width: 90px; min-width: 90px; max-width: 90px; }
 .col-nombre { left: 90px; width: 200px; min-width: 200px; max-width: 200px; overflow: hidden; text-overflow: ellipsis; }
-.col-area { left: 290px; width: 130px; min-width: 130px; max-width: 130px; box-shadow: 4px 0 6px -2px rgba(0,0,0,0.4); }
+.col-area { left: 290px; width: 130px; min-width: 130px; max-width: 130px; }
+.col-jefeturno { left: 420px; width: 110px; min-width: 110px; max-width: 110px; }
+.col-turno { left: 530px; width: 90px; min-width: 90px; max-width: 90px; box-shadow: 4px 0 6px -2px rgba(0,0,0,0.4); }
 
 .matriz-celda {
   font-weight: 600;
@@ -362,4 +385,13 @@ tbody tr:hover { background: var(--surface-2); }
   text-align: center;
   color: var(--text-muted);
   font-size: 0.88rem;
+}
+
+.app-footer {
+  text-align: center;
+  padding: 18px 20px;
+  color: var(--text-muted);
+  font-size: 0.75rem;
+  border-top: 1px solid var(--border);
+  margin-top: 20px;
 }

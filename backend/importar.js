@@ -104,13 +104,23 @@ function sumarDias(fechaISO, delta) {
   return d.toISOString().slice(0, 10);
 }
 
-// Fusiona turnos que cruzan medianoche (turno Noche): si un día no tiene
-// ninguna marca de ENTRADA pero sí de SALIDA, y el día calendario anterior
-// para el mismo rut sí tiene entrada registrada, esa salida en realidad
-// pertenece al turno que comenzó el día anterior. Se mueve ahí y se elimina
-// el día "fantasma" para que no aparezca como un registro aparte.
-//
-// talanaPorDia: Map con key 'rut|fecha' -> { entradas: [...], salidas: [...] }
+function horaAMinutos(horaStr) {
+  if (!horaStr) return null;
+  const [h, m] = horaStr.split(':').map(Number);
+  return h * 60 + m;
+}
+
+// Umbral: una salida marcada antes de esta hora se considera el cierre del
+// turno Noche que empezó el día anterior (no una salida del turno de hoy).
+const UMBRAL_MADRUGADA_MIN = 12 * 60; // 12:00
+
+// Fusiona turnos que cruzan medianoche (turno Noche): si un día tiene una
+// salida de madrugada (antes de las 12:00) y el día anterior tiene una
+// entrada sin cerrar, esa salida pertenece al turno que comenzó el día
+// anterior — sin importar si el día actual TAMBIÉN tiene su propia entrada
+// nueva (caso típico de alguien que hace turno Noche varios días seguidos:
+// cada día cierra el turno de ayer en la madrugada y abre uno nuevo en la
+// noche).
 function fusionarTurnosNocturnos(talanaPorDia) {
   const fusionado = new Map();
   for (const [key, val] of talanaPorDia) {
@@ -120,13 +130,22 @@ function fusionarTurnosNocturnos(talanaPorDia) {
   for (const key of [...fusionado.keys()]) {
     const [rut, fecha] = key.split('|');
     const val = fusionado.get(key);
-    if (val.entradas.length === 0 && val.salidas.length > 0) {
-      const keyAnterior = `${rut}|${sumarDias(fecha, -1)}`;
-      if (fusionado.has(keyAnterior)) {
-        const anterior = fusionado.get(keyAnterior);
-        anterior.salidas = [...anterior.salidas, ...val.salidas].sort();
-        fusionado.delete(key);
-      }
+    if (val.salidas.length === 0) continue;
+
+    const salidasMadrugada = val.salidas.filter(s => horaAMinutos(s) < UMBRAL_MADRUGADA_MIN);
+    if (salidasMadrugada.length === 0) continue;
+
+    const keyAnterior = `${rut}|${sumarDias(fecha, -1)}`;
+    if (!fusionado.has(keyAnterior)) continue;
+
+    const anterior = fusionado.get(keyAnterior);
+    if (anterior.entradas.length === 0) continue; // no hay turno abierto ayer para cerrar
+
+    anterior.salidas = [...anterior.salidas, ...salidasMadrugada].sort();
+    val.salidas = val.salidas.filter(s => !salidasMadrugada.includes(s));
+
+    if (val.entradas.length === 0 && val.salidas.length === 0) {
+      fusionado.delete(key);
     }
   }
 
@@ -458,11 +477,65 @@ async function activarEmpleadosDesdeArchivo(pool, path) {
   return { ruts_en_archivo: ruts.length, activados, desactivados, total: resultado.length };
 }
 
+// Actualiza el área (centro de costo) de cada trabajador según un archivo con
+// columnas RUT y ÁREA. Solo toca a los RUTs que vienen en el archivo; no
+// afecta a nadie más. Las áreas nuevas que aparezcan se agregan automáticamente
+// a la lista de áreas disponibles.
+async function actualizarAreasDesdeArchivo(pool, path) {
+  const wb = leerHojas(path);
+  const ws = wb.Sheets[wb.SheetNames[0]];
+  const rows = XLSX.utils.sheet_to_json(ws, { defval: null });
+
+  const pares = rows
+    .map(r => {
+      const rutRaw = r['RUT'] ?? r['Rut'] ?? r['rut'] ?? Object.values(r)[0];
+      const areaRaw = r['AREA'] ?? r['ÁREA'] ?? r['Area'] ?? r['Área'] ?? r['area'] ?? Object.values(r)[1];
+      return {
+        rut: limpiarRut(rutRaw),
+        area: (areaRaw || '').toString().trim().toUpperCase(),
+      };
+    })
+    .filter(p => p.rut && p.area);
+
+  const ruts = pares.map(p => p.rut);
+  const areasValues = pares.map(p => p.area);
+
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+
+    const areasUnicas = [...new Set(areasValues)];
+    for (const area of areasUnicas) {
+      await client.query('INSERT INTO areas_trabajo (nombre) VALUES ($1) ON CONFLICT (nombre) DO NOTHING', [area]);
+    }
+
+    const { rows: resultado } = await client.query(
+      `UPDATE empleados e SET centro_costo = d.area
+       FROM (SELECT unnest($1::text[]) AS rut, unnest($2::text[]) AS area) d
+       WHERE e.rut = d.rut
+       RETURNING e.rut`,
+      [ruts, areasValues]
+    );
+
+    await client.query('COMMIT');
+    return {
+      filas_en_archivo: pares.length,
+      actualizados: resultado.length,
+      areas_nuevas: areasUnicas.length,
+    };
+  } catch (err) {
+    await client.query('ROLLBACK');
+    throw err;
+  } finally {
+    client.release();
+  }
+}
+
 module.exports = {
   parseTalana, parseCencosud, parseMaestro, parseRotacion, parseAsignacion,
   cargarTodo, cargarTalanaIncremental, cargarCencosudIncremental,
   diaDeSemana, semanaISO, resolverJefeTurno, toFechaISO, toHoraStr,
   contratoDesdeRazonSocial, sumarDias, fusionarTurnosNocturnos, limpiarRut,
-  activarEmpleadosDesdeArchivo,
+  activarEmpleadosDesdeArchivo, actualizarAreasDesdeArchivo,
   determinarTipoTurno, minutosAjusteColacion,
 };

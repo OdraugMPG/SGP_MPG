@@ -119,6 +119,10 @@ export default function Login({ onIngreso }) {
 
           <p style={estilos.footerNota}>🔒 Sistema seguro y certificado</p>
         </div>
+
+        <p style={estilos.copyright}>
+          © {new Date().getFullYear()} SGP · Sistema Gestión de Personas. Todos los derechos reservados by OdraugSmartLogistics.
+        </p>
       </div>
     </div>
   );
@@ -175,6 +179,7 @@ const estilos = {
   panelDerecho: {
     flex: '1',
     display: 'flex',
+    flexDirection: 'column',
     alignItems: 'center',
     justifyContent: 'center',
     background: '#0d1830',
@@ -253,5 +258,11 @@ const estilos = {
     color: '#637090',
     fontSize: '0.78rem',
     marginTop: 24,
+  },
+  copyright: {
+    textAlign: 'center',
+    color: '#4a5578',
+    fontSize: '0.72rem',
+    marginTop: 20,
   },
 };

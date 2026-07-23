@@ -10,6 +10,7 @@ import DashboardAsistencia from './components/DashboardAsistencia';
 import DetalleMarcaciones from './components/DetalleMarcaciones';
 import Login from './components/Login';
 import GestionUsuarios from './components/GestionUsuarios';
+import RequerimientoDotacion from './components/RequerimientoDotacion';
 import { obtenerToken, obtenerUsuarioActual, cerrarSesion } from './api';
 import './index.css';
 
@@ -94,6 +95,12 @@ export default function App() {
           Perfiles / Áreas
         </button>
         <button
+          className={`tab-btn ${tab === 'requerimiento' ? 'active' : ''}`}
+          onClick={() => setTab('requerimiento')}
+        >
+          Requerimiento Dotación
+        </button>
+        <button
           className={`tab-btn ${tab === 'ausencias' ? 'active' : ''}`}
           onClick={() => setTab('ausencias')}
         >
@@ -120,19 +127,44 @@ export default function App() {
       </nav>
 
       <main>
-        {tab === 'carga' && (
+        <div style={{ display: tab === 'dashboard' ? 'block' : 'none' }}>
+          <DashboardAsistencia />
+        </div>
+        <div style={{ display: tab === 'resultados' ? 'block' : 'none' }}>
+          <TablaResultados refrescarSenal={refrescarSenal} />
+        </div>
+        <div style={{ display: tab === 'detalle' ? 'block' : 'none' }}>
+          <DetalleMarcaciones />
+        </div>
+        <div style={{ display: tab === 'reporte' ? 'block' : 'none' }}>
+          <ReporteDiario />
+        </div>
+        <div style={{ display: tab === 'asignacion' ? 'block' : 'none' }}>
+          <AsignacionJefeTurno />
+        </div>
+        <div style={{ display: tab === 'perfiles' ? 'block' : 'none' }}>
+          <PerfilTrabajador />
+        </div>
+        <div style={{ display: tab === 'requerimiento' ? 'block' : 'none' }}>
+          <RequerimientoDotacion />
+        </div>
+        <div style={{ display: tab === 'ausencias' ? 'block' : 'none' }}>
+          <AsignacionAusencias />
+        </div>
+        <div style={{ display: tab === 'actualizacion' ? 'block' : 'none' }}>
+          <ActualizacionDiaria onActualizado={() => setRefrescarSenal(n => n + 1)} />
+        </div>
+        <div style={{ display: tab === 'carga' ? 'block' : 'none' }}>
           <CargaArchivos onImportado={() => { setRefrescarSenal(n => n + 1); setTab('resultados'); }} />
-        )}
-        {tab === 'actualizacion' && <ActualizacionDiaria onActualizado={() => setRefrescarSenal(n => n + 1)} />}
-        {tab === 'dashboard' && <DashboardAsistencia />}
-        {tab === 'resultados' && <TablaResultados refrescarSenal={refrescarSenal} />}
-        {tab === 'detalle' && <DetalleMarcaciones />}
-        {tab === 'reporte' && <ReporteDiario />}
-        {tab === 'asignacion' && <AsignacionJefeTurno />}
-        {tab === 'perfiles' && <PerfilTrabajador />}
-        {tab === 'ausencias' && <AsignacionAusencias />}
-        {tab === 'usuarios' && <GestionUsuarios usuarioActual={usuario} />}
+        </div>
+        <div style={{ display: tab === 'usuarios' ? 'block' : 'none' }}>
+          <GestionUsuarios usuarioActual={usuario} />
+        </div>
       </main>
+
+      <footer className="app-footer">
+        © {new Date().getFullYear()} SGP · Sistema Gestión de Personas. Todos los derechos reservados.
+      </footer>
     </>
   );
 }

@@ -191,6 +191,13 @@ async function calcularResultados(pool) {
   const client = await pool.connect();
   try {
     await client.query('BEGIN');
+
+    // Bloqueo: si otro recálculo está corriendo al mismo tiempo (ej. Talana y
+    // Cencosud subidos casi juntos), este query espera a que termine el
+    // primero antes de seguir, evitando que ambos borren/inserten a la vez y
+    // generen filas duplicadas. El bloqueo se libera solo al hacer COMMIT/ROLLBACK.
+    await client.query('SELECT pg_advisory_xact_lock(741852)');
+
     await client.query('DELETE FROM resultado_diario');
 
     for (let i = 0; i < filas.length; i += TAMANO_LOTE) {

@@ -1,5 +1,6 @@
 import { useState, useEffect } from 'react';
-import { obtenerDashboardAsistencia, listarAreas } from '../api';
+import { obtenerDashboardAsistencia, listarAreas, urlDescargaDashboardAsistencia } from '../api';
+import PanelIndicadores from './PanelIndicadores';
 
 const DIAS_SEMANA = ['dom', 'lun', 'mar', 'mié', 'jue', 'vie', 'sáb'];
 
@@ -73,7 +74,9 @@ export default function DashboardAsistencia() {
     : [];
 
   return (
-    <div className="card">
+    <>
+      <PanelIndicadores />
+      <div className="card">
       <h2>Dashboard de asistencia</h2>
       <p className="card-desc">
         Vista tipo calendario: verde = presente en ambos sistemas, amarillo = marcó solo en uno
@@ -106,6 +109,12 @@ export default function DashboardAsistencia() {
         <button className="btn" type="button" onClick={buscar} disabled={cargando}>
           {cargando ? 'Cargando…' : 'Actualizar'}
         </button>
+        <a
+          className="btn" style={{ textDecoration: 'none', background: 'var(--surface-2)', color: 'var(--text)', border: '1px solid var(--border)' }}
+          href={urlDescargaDashboardAsistencia(desde, hasta, area)}
+        >
+          Descargar Excel
+        </a>
       </div>
 
       <div style={{ display: 'flex', gap: 14, marginBottom: 16, flexWrap: 'wrap', fontSize: '0.78rem' }}>
@@ -127,6 +136,8 @@ export default function DashboardAsistencia() {
                 <th className="col-fija col-rut">RUT</th>
                 <th className="col-fija col-nombre">Nombre</th>
                 <th className="col-fija col-area">Área</th>
+                <th className="col-fija col-jefeturno">Jefe Turno</th>
+                <th className="col-fija col-turno">Turno</th>
                 {data.fechas.map(f => {
                   const { etiqueta, clase } = infoDia(f);
                   return (
@@ -144,6 +155,8 @@ export default function DashboardAsistencia() {
                   <td className="col-fija col-rut">{t.rut}</td>
                   <td className="col-fija col-nombre">{t.nombre}</td>
                   <td className="col-fija col-area">{t.area || '—'}</td>
+                  <td className="col-fija col-jefeturno">{t.jefe_turno || '—'}</td>
+                  <td className="col-fija col-turno">{t.turno || '—'}</td>
                   {data.fechas.map(f => {
                     const e = t.estados[f];
                     return (
@@ -161,6 +174,7 @@ export default function DashboardAsistencia() {
           )}
         </div>
       )}
-    </div>
+      </div>
+    </>
   );
 }

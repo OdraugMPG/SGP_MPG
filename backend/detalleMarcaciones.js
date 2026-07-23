@@ -104,7 +104,7 @@ async function generarDetalleMarcaciones(pool, filtros, limite = 1000) {
   const { rows: cencosudRows } = await pool.query(sqlCencosud, paramsCencosud);
   const cencosudPorClave = new Map(cencosudRows.map(r => [`${r.rut}|${r.fecha}`, r]));
 
-  const { rows: empleados } = await pool.query('SELECT rut, nombre, apellido_paterno, cargo, empresa FROM empleados');
+  const { rows: empleados } = await pool.query('SELECT rut, nombre, apellido_paterno, cargo, empresa, tipo_contrato FROM empleados');
   const empleadoPorRut = new Map(empleados.map(e => [e.rut, e]));
 
   const { rows: asignaciones } = await pool.query('SELECT rut, jefe_turno FROM jefe_turno_asignacion');
@@ -186,7 +186,12 @@ async function generarDetalleMarcaciones(pool, filtros, limite = 1000) {
       : null;
 
     const turnoLabel = normalizarTurnoLabel(cencosud?.turno, codigoAsignado);
-    const tipoContrato = contratoDesdeRazonSocial(emp?.empresa) || 'OUT';
+    const tipoContrato = emp?.tipo_contrato || contratoDesdeRazonSocial(emp?.empresa) || 'OUT';
+
+    let diferenciaHorasTrabajadasMin = null;
+    if (horasTrabajadasMPG !== null && horasTrabajadasCencosud !== null) {
+      diferenciaHorasTrabajadasMin = Math.round((horasTrabajadasMPG - horasTrabajadasCencosud) * 60);
+    }
 
     filas.push({
       fecha,
@@ -205,6 +210,7 @@ async function generarDetalleMarcaciones(pool, filtros, limite = 1000) {
       horas_extras_cencosud: formatoHoras(horasExtrasCencosud),
       diferencia_entrada_min: formatoMinutos(diferenciaEntradaMin),
       diferencia_salida_min: formatoMinutos(diferenciaSalidaMin),
+      diferencia_horas_trabajadas: formatoMinutos(diferenciaHorasTrabajadasMin),
     });
   }
 
@@ -225,14 +231,14 @@ async function exportarDetalleMarcacionesXlsx(pool, filtros) {
     'Fecha', 'Rut', 'Nombre', 'Turno', 'Cargo', 'Tipo Contrato',
     'Entrada MPG', 'Salida MPG', 'Horas Trabajadas', 'Horas Extras',
     'Entrada CENCOSUD', 'Salida CENCOSUD', 'Horas Trabajadas', 'Horas Extras',
-    'Entrada MPG Vs CENCOSUD', 'Salida MPG Vs CENCOSUD',
+    'Entrada MPG Vs CENCOSUD', 'Salida MPG Vs CENCOSUD', 'Horas Trabajadas MPG Vs CENCOSUD',
   ];
 
   const datos = filas.map(f => [
     f.fecha, f.rut, f.nombre || '', f.turno || '', f.cargo || '', f.tipo_contrato || '',
     f.entrada_mpg || '', f.salida_mpg || '', f.horas_trabajadas_mpg ?? '', f.horas_extras_mpg ?? '',
     f.entrada_cencosud || '', f.salida_cencosud || '', f.horas_trabajadas_cencosud ?? '', f.horas_extras_cencosud ?? '',
-    f.diferencia_entrada_min ?? '', f.diferencia_salida_min ?? '',
+    f.diferencia_entrada_min ?? '', f.diferencia_salida_min ?? '', f.diferencia_horas_trabajadas ?? '',
   ]);
 
   const ws = XLSX.utils.aoa_to_sheet([encabezado, ...datos]);
@@ -260,6 +266,7 @@ async function exportarDetalleMarcacionesXlsx(pool, filtros) {
     { wch: 13 }, // Horas Extras Cencosud
     { wch: 20 }, // Diferencia entrada
     { wch: 20 }, // Diferencia salida
+    { wch: 26 }, // Diferencia horas trabajadas
   ];
 
   const wb = XLSX.utils.book_new();

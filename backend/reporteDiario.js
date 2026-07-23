@@ -123,8 +123,15 @@ function horarioProgramado(rotacionMap, codigoJefeTurno, fecha) {
   return rot ? { entrada: rot.hora_entrada, salida: rot.hora_salida } : { entrada: null, salida: null };
 }
 
-async function generarReporteDiario(pool, fecha) {
-  const { rows: empleados } = await pool.query('SELECT * FROM empleados WHERE activo = true');
+async function generarReporteDiario(pool, fecha, opciones = {}) {
+  const { excluirAreas } = opciones;
+  let sqlEmp = 'SELECT * FROM empleados WHERE activo = true';
+  const paramsEmp = [];
+  if (excluirAreas && excluirAreas.length > 0) {
+    paramsEmp.push(excluirAreas);
+    sqlEmp += ` AND (centro_costo IS NULL OR centro_costo <> ALL($${paramsEmp.length}::text[]))`;
+  }
+  const { rows: empleados } = await pool.query(sqlEmp, paramsEmp);
 
   // Se consultan también el día anterior y siguiente porque el turno Noche
   // cruza medianoche: la entrada puede estar el día anterior o la salida al
@@ -177,7 +184,7 @@ async function generarReporteDiario(pool, fecha) {
     const nombreCompleto = `${emp.nombre} ${emp.apellido_paterno || ''}`.trim();
     const codigoJefeTurno = jefeTurnoPorRut.get(emp.rut);
     const cencosud = cencosudPorRut.get(emp.rut);
-    const contrato = contratoDesdeRazonSocial(emp.empresa) || 'OUT';
+    const contrato = emp.tipo_contrato || contratoDesdeRazonSocial(emp.empresa) || 'OUT';
 
     // Si hay una ausencia/permiso asignado para este día, se muestra la sigla
     // en vez de calcular horas desde Talana/Cencosud.
@@ -294,8 +301,8 @@ async function obtenerLogMarcacion(pool, fecha) {
   return rows;
 }
 
-async function exportarReporteDiarioXlsx(pool, fecha) {
-  const filas = await generarReporteDiario(pool, fecha);
+async function exportarReporteDiarioXlsx(pool, fecha, opciones = {}) {
+  const filas = await generarReporteDiario(pool, fecha, opciones);
   const ws = XLSX.utils.json_to_sheet(filas);
 
   const filaNota = filas.length + 3;
@@ -324,4 +331,7 @@ async function exportarReporteDiarioXlsx(pool, fecha) {
   return XLSX.write(wb, { type: 'buffer', bookType: 'xlsx' });
 }
 
-module.exports = { generarReporteDiario, exportarReporteDiarioXlsx, obtenerLogMarcacion, TOLERANCIA_MIN };
+module.exports = {
+  generarReporteDiario, exportarReporteDiarioXlsx, obtenerLogMarcacion, TOLERANCIA_MIN,
+  corregirMarcasDuplicadas, horarioProgramado, horaAMinutos, minutosAHora,
+};
