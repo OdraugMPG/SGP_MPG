@@ -12,7 +12,7 @@ function celdaDiferencia(valor) {
   return <span className={clase}>{valor}</span>;
 }
 
-export default function DetalleMarcaciones() {
+export default function DetalleMarcaciones({ cdGlobal }) {
   const [rut, setRut] = useState('');
   const [desde, setDesde] = useState(hoyISO());
   const [hasta, setHasta] = useState(hoyISO());
@@ -24,7 +24,7 @@ export default function DetalleMarcaciones() {
     setCargando(true);
     setError(null);
     try {
-      setFilas(await obtenerDetalleMarcaciones({ rut, desde, hasta }));
+      setFilas(await obtenerDetalleMarcaciones({ rut, desde, hasta, cd: cdGlobal || undefined }));
     } catch (err) {
       setError(err.message);
     } finally {
@@ -58,7 +58,7 @@ export default function DetalleMarcaciones() {
           {cargando ? 'Cargando…' : 'Buscar'}
         </button>
         <a
-          href={urlDescargaDetalleMarcaciones({ rut, desde, hasta })}
+          href={urlDescargaDetalleMarcaciones({ rut, desde, hasta, cd: cdGlobal || undefined })}
           className="btn"
           style={{ textDecoration: 'none', background: 'var(--surface-2)', color: 'var(--text)', border: '1px solid var(--border)' }}
         >

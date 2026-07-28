@@ -127,23 +127,41 @@ function fusionarTurnosNocturnos(talanaPorDia) {
     fusionado.set(key, { entradas: [...val.entradas], salidas: [...val.salidas] });
   }
 
-  for (const key of [...fusionado.keys()]) {
-    const [rut, fecha] = key.split('|');
-    const val = fusionado.get(key);
+  // Paso 1: decide QUÉ salidas de madrugada deben moverse y hacia dónde,
+  // mirando SOLO los datos originales sin mutar (talanaPorDia), nunca el
+  // resultado parcial (fusionado). Esto es clave: si mirara el resultado
+  // parcial, el orden en que la base devuelve las filas podría hacer que una
+  // salida YA recibida por fusión se interprete de nuevo como "propia" de
+  // ese día y se re-mueva un día más atrás por error (bug real que se
+  // detectó: un día terminaba con 3 salidas fusionadas y el siguiente con 0).
+  const movimientos = []; // [{ keyOrigen, keyDestino, salida }]
+  for (const [key, val] of talanaPorDia) {
     if (val.salidas.length === 0) continue;
-
     const salidasMadrugada = val.salidas.filter(s => horaAMinutos(s) < UMBRAL_MADRUGADA_MIN);
     if (salidasMadrugada.length === 0) continue;
 
+    const [rut, fecha] = key.split('|');
     const keyAnterior = `${rut}|${sumarDias(fecha, -1)}`;
-    if (!fusionado.has(keyAnterior)) continue;
+    if (!talanaPorDia.has(keyAnterior)) continue;
 
-    const anterior = fusionado.get(keyAnterior);
-    if (anterior.entradas.length === 0) continue; // no hay turno abierto ayer para cerrar
+    const anteriorOriginal = talanaPorDia.get(keyAnterior);
+    if (anteriorOriginal.entradas.length === 0) continue; // no hay turno abierto ayer para cerrar
 
-    anterior.salidas = [...anterior.salidas, ...salidasMadrugada].sort();
-    val.salidas = val.salidas.filter(s => !salidasMadrugada.includes(s));
+    for (const salida of salidasMadrugada) {
+      movimientos.push({ keyOrigen: key, keyDestino: keyAnterior, salida });
+    }
+  }
 
+  // Paso 2: aplica todos los movimientos decididos, sobre la copia.
+  for (const { keyOrigen, keyDestino, salida } of movimientos) {
+    const origen = fusionado.get(keyOrigen);
+    const destino = fusionado.get(keyDestino);
+    origen.salidas = origen.salidas.filter(s => s !== salida);
+    destino.salidas = [...destino.salidas, salida].sort();
+  }
+
+  // Limpia días que quedaron completamente vacíos tras mover su única salida.
+  for (const [key, val] of [...fusionado]) {
     if (val.entradas.length === 0 && val.salidas.length === 0) {
       fusionado.delete(key);
     }
@@ -167,7 +185,7 @@ function parseTalana(path) {
     fecha: toFechaISO(r['Fecha']),
     hora: toHoraStr(r['Hora']),
     tipo: (r['Dirección'] || '').trim(), // ojo: esta columna trae 'Entrada'/'Salida'
-    sucursal: r['Sucursal'] || null,
+    sucursal: r['Sucursal'] ? r['Sucursal'].toString().trim().toUpperCase() : null,
     razon_social: r['Razón Social'] || null,
   })).filter(r => r.rut && r.fecha && r.hora);
 }
@@ -175,6 +193,26 @@ function parseTalana(path) {
 // Normaliza un RUT quitando puntos y espacios, dejando 'NNNNNNNN-D'.
 // Acepta tanto '1.123.123-1' como '11231231' (sin guion, si acaso) y los
 // deja en el mismo formato que usa el resto del sistema.
+// Actualiza empleados.cd para cada rut, según su marca de Talana más
+// reciente (columna Sucursal), mapeada a través de cd_sucursal. Se llama
+// después de cargar Talana (completo o incremental) con el mismo 'client'
+// de la transacción, así queda siempre al día automáticamente.
+async function actualizarCdDesdeMarcaciones(client) {
+  await client.query(`
+    WITH sucursal_mas_reciente AS (
+      SELECT DISTINCT ON (rut) rut, TRIM(UPPER(sucursal)) AS sucursal
+      FROM marcaciones_talana
+      WHERE sucursal IS NOT NULL
+      ORDER BY rut, fecha DESC
+    )
+    UPDATE empleados e
+    SET cd = cs.cd
+    FROM sucursal_mas_reciente smr
+    JOIN cd_sucursal cs ON TRIM(UPPER(cs.sucursal)) = smr.sucursal
+    WHERE e.rut = smr.rut
+  `);
+}
+
 function limpiarRut(val) {
   if (!val) return '';
   let s = val.toString().trim().toUpperCase().replace(/\./g, '').replace(/\s/g, '');
@@ -331,6 +369,7 @@ async function cargarTodo(pool, paths) {
       const filas = marcacionesTalana.map(m => [m.rut, m.fecha, m.hora, m.tipo, m.sucursal]);
       await insertarEnLote(client, 'marcaciones_talana', ['rut', 'fecha', 'hora', 'tipo', 'sucursal'], filas);
       console.log('Talana insertado.');
+      await actualizarCdDesdeMarcaciones(client);
 
       const razonPorRut = new Map();
       for (const m of marcacionesTalana) if (m.razon_social) razonPorRut.set(m.rut, m.razon_social);
@@ -401,6 +440,7 @@ async function cargarTalanaIncremental(pool, path) {
 
     const filas = marcaciones.map(m => [m.rut, m.fecha, m.hora, m.tipo, m.sucursal]);
     await insertarEnLote(client, 'marcaciones_talana', ['rut', 'fecha', 'hora', 'tipo', 'sucursal'], filas);
+    await actualizarCdDesdeMarcaciones(client);
 
     const razonPorRut = new Map();
     for (const m of marcaciones) if (m.razon_social) razonPorRut.set(m.rut, m.razon_social);
@@ -531,11 +571,61 @@ async function actualizarAreasDesdeArchivo(pool, path) {
   }
 }
 
+// Actualiza el Jefe de Turno de cada trabajador según un archivo con columnas
+// RUT y JEFE TURNO (valores esperados: T_RD, T_BV, T_WP, CG/PLANO). Solo
+// toca a los RUTs que vienen en el archivo. Si el rut ya tenía una fila en
+// jefe_turno_asignacion se actualiza; si no, se crea (tomando nombre/cargo
+// desde la tabla empleados si existen).
+async function actualizarJefeTurnoDesdeArchivo(pool, path) {
+  const wb = leerHojas(path);
+  const ws = wb.Sheets[wb.SheetNames[0]];
+  const rows = XLSX.utils.sheet_to_json(ws, { defval: null });
+
+  const pares = rows
+    .map(r => {
+      const rutRaw = r['RUT'] ?? r['Rut'] ?? r['rut'] ?? Object.values(r)[0];
+      const jtRaw = r['JEFE TURNO'] ?? r['Jefe Turno'] ?? r['JEFE_TURNO'] ?? r['jefe_turno'] ?? Object.values(r)[1];
+      return {
+        rut: limpiarRut(rutRaw),
+        jefe_turno: (jtRaw || '').toString().trim().toUpperCase(),
+      };
+    })
+    .filter(p => p.rut && p.jefe_turno);
+
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+    let actualizados = 0;
+    for (const p of pares) {
+      const { rows: emp } = await client.query('SELECT nombre, cargo, centro_costo FROM empleados WHERE rut = $1', [p.rut]);
+      const nombre = emp[0]?.nombre || null;
+      const cargo = emp[0]?.cargo || null;
+      const centroCosto = emp[0]?.centro_costo || null;
+      const { rowCount } = await client.query(
+        `INSERT INTO jefe_turno_asignacion (rut, nombre, cargo, jefe_turno, centro_costo)
+         VALUES ($1,$2,$3,$4,$5)
+         ON CONFLICT (rut) DO UPDATE SET jefe_turno = EXCLUDED.jefe_turno,
+           nombre = COALESCE(jefe_turno_asignacion.nombre, EXCLUDED.nombre),
+           cargo = COALESCE(jefe_turno_asignacion.cargo, EXCLUDED.cargo)`,
+        [p.rut, nombre, cargo, p.jefe_turno, centroCosto]
+      );
+      actualizados += rowCount;
+    }
+    await client.query('COMMIT');
+    return { filas_en_archivo: pares.length, actualizados };
+  } catch (err) {
+    await client.query('ROLLBACK');
+    throw err;
+  } finally {
+    client.release();
+  }
+}
+
 module.exports = {
   parseTalana, parseCencosud, parseMaestro, parseRotacion, parseAsignacion,
   cargarTodo, cargarTalanaIncremental, cargarCencosudIncremental,
   diaDeSemana, semanaISO, resolverJefeTurno, toFechaISO, toHoraStr,
   contratoDesdeRazonSocial, sumarDias, fusionarTurnosNocturnos, limpiarRut,
-  activarEmpleadosDesdeArchivo, actualizarAreasDesdeArchivo,
-  determinarTipoTurno, minutosAjusteColacion,
+  activarEmpleadosDesdeArchivo, actualizarAreasDesdeArchivo, actualizarJefeTurnoDesdeArchivo,
+  determinarTipoTurno, minutosAjusteColacion, actualizarCdDesdeMarcaciones,
 };

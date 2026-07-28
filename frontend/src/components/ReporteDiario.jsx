@@ -125,7 +125,7 @@ function ReporteMasivoPorJefeTurno() {
   );
 }
 
-export default function ReporteDiario() {
+export default function ReporteDiario({ cdGlobal }) {
   const [fecha, setFecha] = useState(hoyISO());
   const [filas, setFilas] = useState(null);
   const [log, setLog] = useState(null);
@@ -147,7 +147,7 @@ export default function ReporteDiario() {
     setError(null);
     try {
       const [res, logRes] = await Promise.all([
-        obtenerReporteDiario(fecha, areasExcluidas),
+        obtenerReporteDiario(fecha, areasExcluidas, cdGlobal || undefined),
         obtenerLogMarcacion(fecha),
       ]);
       setFilas(res);
@@ -176,7 +176,7 @@ export default function ReporteDiario() {
           {cargando ? 'Cargando…' : 'Ver reporte'}
         </button>
         {filas && filas.length > 0 && (
-          <a className="btn" style={{ textDecoration: 'none' }} href={urlDescargaReporteDiario(fecha, areasExcluidas)}>
+          <a className="btn" style={{ textDecoration: 'none' }} href={urlDescargaReporteDiario(fecha, areasExcluidas, cdGlobal || undefined)}>
             Descargar Excel
           </a>
         )}

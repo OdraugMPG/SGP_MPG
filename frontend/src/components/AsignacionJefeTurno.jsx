@@ -13,7 +13,7 @@ function labelTurno(valor) {
   return OPCIONES_TURNO.find(o => o.valor === valor)?.label || valor || '—';
 }
 
-export default function AsignacionJefeTurno() {
+export default function AsignacionJefeTurno({ cdGlobal }) {
   const [query, setQuery] = useState('');
   const [resultadosBusqueda, setResultadosBusqueda] = useState([]);
   const [buscando, setBuscando] = useState(false);
@@ -41,7 +41,7 @@ export default function AsignacionJefeTurno() {
     const timer = setTimeout(async () => {
       setBuscando(true);
       try {
-        const data = await buscarEmpleados(query);
+        const data = await buscarEmpleados(query, cdGlobal || undefined);
         setResultadosBusqueda(data);
       } catch (err) {
         setError(err.message);

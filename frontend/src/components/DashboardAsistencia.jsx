@@ -1,6 +1,8 @@
 import { useState, useEffect } from 'react';
 import { obtenerDashboardAsistencia, listarAreas, urlDescargaDashboardAsistencia } from '../api';
 import PanelIndicadores from './PanelIndicadores';
+import GraficoCumplimientoCargo from './GraficoCumplimientoCargo';
+import DashboardPresentismoHistorico from './DashboardPresentismoHistorico';
 
 const DIAS_SEMANA = ['dom', 'lun', 'mar', 'mié', 'jue', 'vie', 'sáb'];
 
@@ -38,7 +40,7 @@ const CLASE_POR_CATEGORIA = {
   diaLibreTrabajado: 'matriz-diaLibreTrabajado',
 };
 
-export default function DashboardAsistencia() {
+export default function DashboardAsistencia({ cdGlobal }) {
   const [desde, setDesde] = useState(hace6DiasISO());
   const [hasta, setHasta] = useState(hoyISO());
   const [area, setArea] = useState('');
@@ -55,13 +57,16 @@ export default function DashboardAsistencia() {
     setCargando(true);
     setError(null);
     try {
-      setData(await obtenerDashboardAsistencia(desde, hasta, area || undefined));
+      setData(await obtenerDashboardAsistencia(desde, hasta, area || undefined, cdGlobal || undefined));
     } catch (err) {
       setError(err.message);
     } finally {
       setCargando(false);
     }
   }
+
+  // Si cambia el CD elegido en el header, vuelve a buscar automáticamente.
+  useEffect(() => { buscar(); }, [cdGlobal]); // eslint-disable-line react-hooks/exhaustive-deps
 
   useEffect(() => { buscar(); }, []); // carga inicial con el rango por defecto
 
@@ -75,7 +80,9 @@ export default function DashboardAsistencia() {
 
   return (
     <>
-      <PanelIndicadores />
+      <PanelIndicadores cd={cdGlobal} />
+      <GraficoCumplimientoCargo />
+      <DashboardPresentismoHistorico />
       <div className="card">
       <h2>Dashboard de asistencia</h2>
       <p className="card-desc">
@@ -111,7 +118,7 @@ export default function DashboardAsistencia() {
         </button>
         <a
           className="btn" style={{ textDecoration: 'none', background: 'var(--surface-2)', color: 'var(--text)', border: '1px solid var(--border)' }}
-          href={urlDescargaDashboardAsistencia(desde, hasta, area)}
+          href={urlDescargaDashboardAsistencia(desde, hasta, area, cdGlobal)}
         >
           Descargar Excel
         </a>

@@ -124,9 +124,10 @@ export async function obtenerResultados(filtros) {
   return res.json();
 }
 
-export async function obtenerReporteDiario(fecha, excluirAreas = []) {
+export async function obtenerReporteDiario(fecha, excluirAreas = [], cd) {
   const params = new URLSearchParams({ fecha });
   if (excluirAreas.length > 0) params.append('excluirAreas', excluirAreas.join(','));
+  if (cd) params.append('cd', cd);
   const res = await authFetch(`${API_URL}/api/reporte-diario?${params.toString()}`);
   if (!res.ok) throw new Error('Error al consultar el reporte diario');
   return res.json();
@@ -134,10 +135,11 @@ export async function obtenerReporteDiario(fecha, excluirAreas = []) {
 
 // La descarga del Excel es un link directo (<a href>), así que el token va
 // como query param en vez de header (no se puede setear header en una navegación).
-export function urlDescargaReporteDiario(fecha, excluirAreas = []) {
+export function urlDescargaReporteDiario(fecha, excluirAreas = [], cd) {
   const token = obtenerToken();
   const params = new URLSearchParams({ fecha, token: token || '' });
   if (excluirAreas.length > 0) params.append('excluirAreas', excluirAreas.join(','));
+  if (cd) params.append('cd', cd);
   return `${API_URL}/api/reporte-diario/export?${params.toString()}`;
 }
 
@@ -173,9 +175,50 @@ export function urlDescargaDetalleMarcaciones(filtros) {
   return `${API_URL}/api/detalle-marcaciones/export?${params.toString()}`;
 }
 
-export async function obtenerIndicadores(desde, hasta, area) {
+export async function obtenerCierreNomina(desde, hasta, cd) {
+  const params = new URLSearchParams({ desde, hasta });
+  if (cd) params.append('cd', cd);
+  const res = await authFetch(`${API_URL}/api/cierre-nomina?${params.toString()}`);
+  const data = await res.json();
+  if (!res.ok) throw new Error(data.error || 'Error al calcular el cierre de nómina');
+  return data;
+}
+
+export function urlDescargaCierreNomina(desde, hasta, cd) {
+  const params = new URLSearchParams({ desde, hasta, token: obtenerToken() || '' });
+  if (cd) params.append('cd', cd);
+  return `${API_URL}/api/cierre-nomina/export?${params.toString()}`;
+}
+
+export async function listarCargosDashboard() {
+  const res = await authFetch(`${API_URL}/api/indicadores/cargos-dashboard`);
+  if (!res.ok) throw new Error('Error al listar los cargos del dashboard');
+  return res.json();
+}
+
+export async function obtenerPresentismoHistorico(meses, jefesTurno) {
+  const params = new URLSearchParams({ meses: meses.join(',') });
+  if (jefesTurno && jefesTurno.length > 0) params.append('jefesTurno', jefesTurno.join(','));
+  const res = await authFetch(`${API_URL}/api/indicadores/presentismo-historico?${params.toString()}`);
+  const data = await res.json();
+  if (!res.ok) throw new Error(data.error || 'Error al cargar el presentismo histórico');
+  return data;
+}
+
+export async function obtenerSerieCumplimiento(desde, hasta, cargo, jefesTurno) {
+  const params = new URLSearchParams({ desde, hasta });
+  if (cargo) params.append('cargo', cargo);
+  if (jefesTurno && jefesTurno.length > 0) params.append('jefesTurno', jefesTurno.join(','));
+  const res = await authFetch(`${API_URL}/api/indicadores/serie-cumplimiento?${params.toString()}`);
+  const data = await res.json();
+  if (!res.ok) throw new Error(data.error || 'Error al cargar la serie de cumplimiento');
+  return data;
+}
+
+export async function obtenerIndicadores(desde, hasta, area, cd) {
   const params = new URLSearchParams({ desde, hasta });
   if (area) params.append('area', area);
+  if (cd) params.append('cd', cd);
   const res = await authFetch(`${API_URL}/api/indicadores?${params.toString()}`);
   const data = await res.json();
   if (!res.ok) throw new Error(data.error || 'Error al cargar los indicadores');
@@ -188,18 +231,20 @@ export function urlDescargaReporteDesvinculacion(desde, hasta, area) {
   return `${API_URL}/api/indicadores/reporte-desvinculacion/export?${params.toString()}`;
 }
 
-export async function obtenerDashboardAsistencia(desde, hasta, area) {
+export async function obtenerDashboardAsistencia(desde, hasta, area, cd) {
   const params = new URLSearchParams({ desde, hasta });
   if (area) params.append('area', area);
+  if (cd) params.append('cd', cd);
   const res = await authFetch(`${API_URL}/api/dashboard-asistencia?${params.toString()}`);
   const data = await res.json();
   if (!res.ok) throw new Error(data.error || 'Error al cargar el dashboard');
   return data;
 }
 
-export function urlDescargaDashboardAsistencia(desde, hasta, area) {
+export function urlDescargaDashboardAsistencia(desde, hasta, area, cd) {
   const params = new URLSearchParams({ desde, hasta, token: obtenerToken() || '' });
   if (area) params.append('area', area);
+  if (cd) params.append('cd', cd);
   return `${API_URL}/api/dashboard-asistencia/export?${params.toString()}`;
 }
 
@@ -231,8 +276,10 @@ export async function quitarAusencia(rut, fecha) {
   return data;
 }
 
-export async function buscarEmpleados(query) {
-  const res = await authFetch(`${API_URL}/api/empleados?q=${encodeURIComponent(query)}`);
+export async function buscarEmpleados(query, cd) {
+  const params = new URLSearchParams({ q: query });
+  if (cd) params.append('cd', cd);
+  const res = await authFetch(`${API_URL}/api/empleados?${params.toString()}`);
   if (!res.ok) throw new Error('Error al buscar empleados');
   return res.json();
 }
@@ -326,10 +373,86 @@ export async function listarCargos() {
   return res.json();
 }
 
+// --- CDs (Centros de Distribución) ---
+
+export async function listarCds() {
+  const res = await authFetch(`${API_URL}/api/cds`);
+  if (!res.ok) throw new Error('Error al listar los CDs');
+  return res.json();
+}
+
+export async function obtenerMisCds() {
+  const res = await authFetch(`${API_URL}/api/mis-cds`);
+  if (!res.ok) throw new Error('Error al consultar mis CDs');
+  return res.json();
+}
+
+export async function listarMapeoCdSucursal() {
+  const res = await authFetch(`${API_URL}/api/cd-sucursal`);
+  if (!res.ok) throw new Error('Error al listar el mapeo de sucursales');
+  return res.json();
+}
+
+export async function guardarMapeoCdSucursal(sucursal, cd) {
+  const res = await authFetch(`${API_URL}/api/cd-sucursal`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ sucursal, cd }),
+  });
+  const data = await res.json();
+  if (!res.ok || !data.ok) throw new Error(data.error || 'Error al guardar el mapeo');
+  return data;
+}
+
+export async function eliminarMapeoCdSucursal(sucursal) {
+  const res = await authFetch(`${API_URL}/api/cd-sucursal/${encodeURIComponent(sucursal)}`, { method: 'DELETE' });
+  const data = await res.json();
+  if (!res.ok || !data.ok) throw new Error(data.error || 'Error al eliminar el mapeo');
+  return data;
+}
+
+export async function recalcularCd() {
+  const res = await authFetch(`${API_URL}/api/empleados/recalcular-cd`, { method: 'POST' });
+  const data = await res.json();
+  if (!res.ok || !data.ok) throw new Error(data.error || 'Error al recalcular el CD');
+  return data;
+}
+
+export async function listarSucursalesSinMapear() {
+  const res = await authFetch(`${API_URL}/api/cd-sucursal/sin-mapear`);
+  const data = await res.json();
+  if (!res.ok) throw new Error(data.error || 'Error al consultar sucursales sin mapear');
+  return data;
+}
+
 export async function listarAreas() {
   const res = await authFetch(`${API_URL}/api/areas`);
   if (!res.ok) throw new Error('Error al listar áreas');
   return res.json();
+}
+
+export async function listarCargosRequerimiento() {
+  const res = await authFetch(`${API_URL}/api/cargos-requerimiento`);
+  if (!res.ok) throw new Error('Error al listar los cargos de requerimiento');
+  return res.json();
+}
+
+export async function crearCargoRequerimiento(nombre) {
+  const res = await authFetch(`${API_URL}/api/cargos-requerimiento`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ nombre }),
+  });
+  const data = await res.json();
+  if (!res.ok || !data.ok) throw new Error(data.error || 'Error al crear el cargo');
+  return data;
+}
+
+export async function eliminarCargoRequerimiento(nombre) {
+  const res = await authFetch(`${API_URL}/api/cargos-requerimiento/${encodeURIComponent(nombre)}`, { method: 'DELETE' });
+  const data = await res.json();
+  if (!res.ok || !data.ok) throw new Error(data.error || 'Error al eliminar el cargo');
+  return data;
 }
 
 export async function crearArea(nombre) {
@@ -399,6 +522,56 @@ export async function guardarRequerimientoDotacionMasivo(datos) {
 
 // --- Gestión de usuarios ---
 
+// --- Roles y módulos ---
+
+export async function listarModulosDisponibles() {
+  const res = await authFetch(`${API_URL}/api/roles/modulos-disponibles`);
+  if (!res.ok) throw new Error('Error al listar los módulos disponibles');
+  return res.json();
+}
+
+export async function obtenerMisModulos() {
+  const res = await authFetch(`${API_URL}/api/roles/mis-modulos`);
+  if (!res.ok) throw new Error('Error al consultar los módulos habilitados');
+  return res.json();
+}
+
+export async function listarRoles() {
+  const res = await authFetch(`${API_URL}/api/roles`);
+  const data = await res.json();
+  if (!res.ok) throw new Error(data.error || 'Error al listar los roles');
+  return data;
+}
+
+export async function crearRol(nombre, modulos) {
+  const res = await authFetch(`${API_URL}/api/roles`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ nombre, modulos }),
+  });
+  const data = await res.json();
+  if (!res.ok || !data.ok) throw new Error(data.error || 'Error al crear el rol');
+  return data;
+}
+
+export async function actualizarRol(nombre, modulos) {
+  const res = await authFetch(`${API_URL}/api/roles/${encodeURIComponent(nombre)}`, {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ modulos }),
+  });
+  const data = await res.json();
+  if (!res.ok || !data.ok) throw new Error(data.error || 'Error al actualizar el rol');
+  return data;
+}
+
+export async function eliminarRol(nombre) {
+  const res = await authFetch(`${API_URL}/api/roles/${encodeURIComponent(nombre)}`, { method: 'DELETE' });
+  const data = await res.json();
+  if (!res.ok || !data.ok) throw new Error(data.error || 'Error al eliminar el rol');
+  return data;
+}
+
 export async function listarUsuarios() {
   const res = await authFetch(`${API_URL}/api/usuarios`);
   const data = await res.json();
@@ -467,6 +640,18 @@ export async function actualizarAreasMasivo(file) {
   });
   const data = await res.json();
   if (!res.ok || !data.ok) throw new Error(data.error || 'Error al actualizar las áreas');
+  return data;
+}
+
+export async function actualizarJefeTurnoMasivo(file) {
+  const formData = new FormData();
+  formData.append('jefeturno', file);
+  const res = await authFetch(`${API_URL}/api/empleados/jefe-turno-masivo`, {
+    method: 'POST',
+    body: formData,
+  });
+  const data = await res.json();
+  if (!res.ok || !data.ok) throw new Error(data.error || 'Error al actualizar los jefes de turno');
   return data;
 }
 

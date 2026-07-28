@@ -1,5 +1,5 @@
 const XLSX = require('xlsx');
-const { contratoDesdeRazonSocial, diaDeSemana, semanaISO, resolverJefeTurno, sumarDias, fusionarTurnosNocturnos } = require('./importar');
+const { contratoDesdeRazonSocial, diaDeSemana, semanaISO, resolverJefeTurno, sumarDias, fusionarTurnosNocturnos, determinarTipoTurno } = require('./importar');
 
 const TOLERANCIA_MIN = 20;
 
@@ -93,7 +93,7 @@ function resolverHora(candidatosTalana, horaReferenciaCencosud, preferirPrimero)
   return null;
 }
 
-function normalizarTurno(valorCencosud, codigoJefeTurno) {
+function normalizarTurno(valorCencosud, codigoJefeTurno, fecha, rotacionBasePorClave) {
   if (valorCencosud) {
     const v = valorCencosud.toString().trim().toUpperCase();
     if (v === 'NOCHE') return 'Noche';
@@ -102,6 +102,13 @@ function normalizarTurno(valorCencosud, codigoJefeTurno) {
     if (v !== 'SIN TURNO') return valorCencosud;
   }
   if (codigoJefeTurno === 'CG' || codigoJefeTurno === 'PLANO') return 'Plano';
+  // Respaldo: si Cencosud no reportó turno ese día (típico cuando el turno
+  // Noche cruza medianoche), se resuelve igual que en el resto del sistema,
+  // según la rotación semanal vigente para ese jefe de turno.
+  const tipo = determinarTipoTurno(codigoJefeTurno, fecha, rotacionBasePorClave);
+  if (tipo === 'NOCHE') return 'Noche';
+  if (tipo === 'AM' || tipo === 'PM') return tipo;
+  if (tipo === 'PLANO') return 'Plano';
   return '';
 }
 
@@ -124,13 +131,14 @@ function horarioProgramado(rotacionMap, codigoJefeTurno, fecha) {
 }
 
 async function generarReporteDiario(pool, fecha, opciones = {}) {
-  const { excluirAreas } = opciones;
+  const { excluirAreas, cds } = opciones; // cds: null (todos) o arreglo de CDs permitidos/solicitados
   let sqlEmp = 'SELECT * FROM empleados WHERE activo = true';
   const paramsEmp = [];
   if (excluirAreas && excluirAreas.length > 0) {
     paramsEmp.push(excluirAreas);
     sqlEmp += ` AND (centro_costo IS NULL OR centro_costo <> ALL($${paramsEmp.length}::text[]))`;
   }
+  if (cds) { paramsEmp.push(cds); sqlEmp += ` AND cd = ANY($${paramsEmp.length}::text[])`; }
   const { rows: empleados } = await pool.query(sqlEmp, paramsEmp);
 
   // Se consultan también el día anterior y siguiente porque el turno Noche
@@ -144,7 +152,7 @@ async function generarReporteDiario(pool, fecha, opciones = {}) {
   );
   const talanaPorDiaCrudo = new Map(); // key rut|fecha -> {entradas, salidas}
   for (const r of talanaRows) {
-    const key = `${r.rut}|${r.fecha}`;
+    const key = `${(r.rut || '').toString().trim().toUpperCase()}|${(r.fecha || '').toString().trim()}`;
     if (!talanaPorDiaCrudo.has(key)) talanaPorDiaCrudo.set(key, { entradas: [], salidas: [] });
     const acc = talanaPorDiaCrudo.get(key);
     const tipo = (r.tipo || '').toLowerCase();
@@ -156,7 +164,6 @@ async function generarReporteDiario(pool, fecha, opciones = {}) {
     acc.entradas.sort();
     acc.salidas.sort();
   }
-
   const { rows: cencosudRows } = await pool.query(
     'SELECT rut, hora_entrada, hora_salida, turno FROM marcaciones_cencosud WHERE fecha = $1', [fecha]
   );
@@ -166,10 +173,14 @@ async function generarReporteDiario(pool, fecha, opciones = {}) {
   const jefeTurnoPorRut = new Map(asignaciones.map(a => [a.rut, a.jefe_turno]));
 
   const { rows: rotacionRows } = await pool.query(
-    'SELECT sem, jefe_turno, dia, hora_entrada, hora_salida FROM rotacion_turnos'
+    'SELECT sem, jefe_turno, dia, hora_entrada, hora_salida, rotacion_base FROM rotacion_turnos'
   );
   const rotacionMap = new Map();
   for (const r of rotacionRows) rotacionMap.set(`${r.sem}|${r.jefe_turno}|${r.dia}`, r);
+  const rotacionBasePorClave = new Map();
+  for (const r of rotacionRows) {
+    if (r.rotacion_base) rotacionBasePorClave.set(`${r.sem}|${r.jefe_turno}`, r.rotacion_base);
+  }
 
 
   const { rows: ausenciaRows } = await pool.query(
@@ -196,7 +207,7 @@ async function generarReporteDiario(pool, fecha, opciones = {}) {
         NOMBRE: nombreCompleto,
         RUT: emp.rut,
         CARGO: emp.cargo || '',
-        TURNO: normalizarTurno(cencosud?.turno, codigoJefeTurno),
+        TURNO: normalizarTurno(cencosud?.turno, codigoJefeTurno, fecha, rotacionBasePorClave),
         FECHA: fecha,
         'HORA (ENTRADA)': ausencia,
         'HORA (SALIDA)': ausencia,
@@ -209,7 +220,7 @@ async function generarReporteDiario(pool, fecha, opciones = {}) {
       continue;
     }
 
-    const talanaCruda = talanaFusionado.get(`${emp.rut}|${fecha}`) || { entradas: [], salidas: [] };
+    const talanaCruda = talanaFusionado.get(`${(emp.rut || '').toString().trim().toUpperCase()}|${(fecha || '').toString().trim()}`) || { entradas: [], salidas: [] };
 
     // 1) Corrige doble marcación del mismo tipo (ej: 2 "Entrada" sin ninguna "Salida")
     const { entradas, salidas, log: logDuplicado } = corregirMarcasDuplicadas(talanaCruda);
@@ -255,7 +266,7 @@ async function generarReporteDiario(pool, fecha, opciones = {}) {
       NOMBRE: nombreCompleto,
       RUT: emp.rut,
       CARGO: emp.cargo || '',
-      TURNO: normalizarTurno(cencosud?.turno, codigoJefeTurno),
+      TURNO: normalizarTurno(cencosud?.turno, codigoJefeTurno, fecha, rotacionBasePorClave),
       FECHA: fecha,
       'HORA (ENTRADA)': horaEntrada || '00:00:00',
       'HORA (SALIDA)': horaSalida || '00:00:00',

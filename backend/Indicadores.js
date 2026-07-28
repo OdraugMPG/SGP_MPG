@@ -1,5 +1,63 @@
-const { diaDeSemana, semanaISO, resolverJefeTurno } = require('./importar');
+const { diaDeSemana, semanaISO, resolverJefeTurno, determinarTipoTurno, sumarDias } = require('./importar');
 const XLSX = require('xlsx');
+
+// Cargos relevantes para los dashboards gerenciales (línea de tiempo). Se
+// acotó esta lista a pedido de gerencia, para que los gráficos de línea se
+// lean con claridad.
+const CARGOS_DASHBOARD = [
+  'ADMINISTRATIVO (A)',
+  'JEFE (A) DE OPERACIONES',
+  'JEFE DE TURNO SENIOR',
+  'OPERADOR (A) DE MAQUINA ESPECIALIZADO',
+  'OPERARIO (A) MULTIFUNCIONAL',
+  'SUPERVISOR (A) SENIOR',
+];
+
+function etiquetaTurno(tipoTurno) {
+  if (tipoTurno === 'NOCHE') return 'Noche';
+  if (tipoTurno === 'PLANO') return 'Plano';
+  if (tipoTurno === 'AM' || tipoTurno === 'PM') return 'Rotativo';
+  return 'Sin asignar';
+}
+
+// Indica si, para un TIPO de turno (no una persona en particular), esa fecha
+// es día de descanso: Noche y Plano libran Sábado y Domingo; AM/PM (Rotativo)
+// libra solo Domingo. Se usa para no exigir dotación en un turno que ese día
+// nadie debería estar trabajando — de lo contrario, el requerido baja el
+// promedio de cumplimiento sin que haya ninguna falta real.
+function esDiaLibreTipoTurno(tipoTurno, fecha) {
+  const dow = new Date(fecha + 'T00:00:00').getDay(); // 0=Dom ... 6=Sáb
+  if (tipoTurno === 'NOCHE' || tipoTurno === 'PLANO') return dow === 0 || dow === 6;
+  if (tipoTurno === 'AM' || tipoTurno === 'PM') return dow === 0;
+  return false;
+}
+
+// Devuelve las fechas de un rango, SUPRIMIENDO los domingos salvo que exista
+// al menos una marca de asistencia real ese domingo (turno Noche trabajado,
+// etc.) — para no ensuciar los gráficos con domingos que casi nadie trabaja.
+async function fechasValidas(pool, desde, hasta) {
+  const dIni = new Date(desde + 'T00:00:00');
+  const dFin = new Date(hasta + 'T00:00:00');
+  const dias = Math.round((dFin - dIni) / 86400000) + 1;
+  const todas = [];
+  for (let i = 0; i < dias; i++) {
+    const d = new Date(dIni);
+    d.setDate(d.getDate() + i);
+    todas.push(d.toISOString().slice(0, 10));
+  }
+
+  const domingos = todas.filter(f => new Date(f + 'T00:00:00').getDay() === 0);
+  let domingosConAsistencia = new Set();
+  if (domingos.length > 0) {
+    const { rows } = await pool.query(
+      `SELECT DISTINCT fecha FROM resultado_diario WHERE fecha = ANY($1::text[]) AND (marco_talana = 1 OR marco_cencosud = 1)`,
+      [domingos]
+    );
+    domingosConAsistencia = new Set(rows.map(r => r.fecha));
+  }
+
+  return todas.filter(f => new Date(f + 'T00:00:00').getDay() !== 0 || domingosConAsistencia.has(f));
+}
 
 function horaAMinutos(horaStr) {
   if (!horaStr) return null;
@@ -60,13 +118,28 @@ function detectarCausalInasistencia(fechasFIn) {
   return alertas;
 }
 
-async function calcularIndicadores(pool, filtros) {
-  const { desde, hasta, area } = filtros;
+// Dado un arreglo de registros históricos [{vigente_desde, vigente_hasta, cantidad_requerida}]
+// (en cualquier orden), devuelve el valor vigente en 'fecha': el que tenga
+// vigente_desde <= fecha, y (vigente_hasta es null O vigente_hasta >= fecha),
+// tomando el de vigente_desde más reciente si hay varios que calzan.
+function valorVigenteEnFecha(registros, fecha) {
+  let mejor = null;
+  for (const r of registros) {
+    if (r.vigente_desde > fecha) continue;
+    if (r.vigente_hasta && r.vigente_hasta < fecha) continue;
+    if (!mejor || r.vigente_desde > mejor.vigente_desde) mejor = r;
+  }
+  return mejor ? mejor.cantidad_requerida : null;
+}
 
-  // --- Universo de trabajadores activos (filtrado por área si corresponde) ---
+async function calcularIndicadores(pool, filtros) {
+  const { desde, hasta, area, cds } = filtros; // cds: null (todos) o arreglo de CDs permitidos/solicitados
+
+  // --- Universo de trabajadores activos (filtrado por área y/o CD si corresponde) ---
   let sqlEmp = 'SELECT rut, nombre, apellido_paterno, cargo, centro_costo FROM empleados WHERE activo = true';
   const paramsEmp = [];
   if (area) { paramsEmp.push(area); sqlEmp += ` AND centro_costo = $${paramsEmp.length}`; }
+  if (cds) { paramsEmp.push(cds); sqlEmp += ` AND cd = ANY($${paramsEmp.length}::text[])`; }
   const { rows: empleados } = await pool.query(sqlEmp, paramsEmp);
   const empleadoPorRut = new Map(empleados.map(e => [e.rut, e]));
   const rutsActivos = new Set(empleados.map(e => e.rut));
@@ -86,36 +159,22 @@ async function calcularIndicadores(pool, filtros) {
   );
   const ausenciasFiltradas = ausencias.filter(a => rutsActivos.has(a.rut));
 
-  // --- Presentismo / Ausentismo ---
-  // Se cuenta como "día evaluado" cualquier día con marca en algún sistema o
-  // con ausencia/permiso registrado (evita contar días futuros o sin datos).
-  const diasConDato = new Set();
-  const diasPresente = new Set();
-  for (const r of resultadosFiltrados) {
-    const clave = `${r.rut}|${r.fecha}`;
-    diasConDato.add(clave);
-    if (r.marco_talana || r.marco_cencosud) diasPresente.add(clave);
-  }
-  for (const a of ausenciasFiltradas) {
-    diasConDato.add(`${a.rut}|${a.fecha}`);
-  }
-
-  const diasEvaluados = diasConDato.size;
-  const diasPresentismo = diasPresente.size;
-  const presentismoPct = diasEvaluados > 0 ? Math.round((diasPresentismo / diasEvaluados) * 1000) / 10 : null;
-  const ausentismoPct = presentismoPct !== null ? Math.round((100 - presentismoPct) * 10) / 10 : null;
-
   // --- Salidas anticipadas ---
   // Requiere el horario esperado de salida según turno asignado + rotación.
   const { rows: asignaciones } = await pool.query('SELECT rut, jefe_turno FROM jefe_turno_asignacion');
   const jefeTurnoPorRut = new Map(asignaciones.map(a => [a.rut, a.jefe_turno]));
   const { rows: rotacionRows } = await pool.query(
-    'SELECT sem, jefe_turno, dia, hora_salida FROM rotacion_turnos'
+    'SELECT sem, jefe_turno, dia, hora_salida, rotacion_base FROM rotacion_turnos'
   );
   const rotacionMap = new Map(rotacionRows.map(r => [`${r.sem}|${r.jefe_turno}|${r.dia}`, r.hora_salida]));
+  const rotacionBasePorClave = new Map();
+  for (const r of rotacionRows) {
+    if (r.rotacion_base) rotacionBasePorClave.set(`${r.sem}|${r.jefe_turno}`, r.rotacion_base);
+  }
   const TOLERANCIA_SALIDA_MIN = 15;
 
   let salidasAnticipadas = 0;
+  const salidasAnticipadasPorTurno = {};
   for (const r of resultadosFiltrados) {
     if (!r.hora_salida_real) continue;
     const codigo = jefeTurnoPorRut.get(r.rut);
@@ -126,13 +185,28 @@ async function calcularIndicadores(pool, filtros) {
     const salidaEsperada = rotacionMap.get(`${sem}|${codigoResuelto}|${dia}`);
     if (!salidaEsperada) continue;
     const diffMin = horaAMinutos(salidaEsperada) - horaAMinutos(r.hora_salida_real);
-    if (diffMin > TOLERANCIA_SALIDA_MIN) salidasAnticipadas++;
+    if (diffMin > TOLERANCIA_SALIDA_MIN) {
+      salidasAnticipadas++;
+      const tipoTurnoDia = determinarTipoTurno(codigo, r.fecha, rotacionBasePorClave);
+      const etiqueta = etiquetaTurno(tipoTurnoDia);
+      salidasAnticipadasPorTurno[etiqueta] = (salidasAnticipadasPorTurno[etiqueta] || 0) + 1;
+    }
   }
 
-  // --- Permisos y licencias (conteo por tipo) ---
+  // --- Permisos y licencias (conteo por tipo, informativo, todos los tipos) ---
   const conteoTipos = {};
   for (const a of ausenciasFiltradas) {
     conteoTipos[a.tipo] = (conteoTipos[a.tipo] || 0) + 1;
+  }
+
+  // --- Ausentismo por tipo (curado): solo las causales que cuentan como
+  // ausentismo real. Renuncia (R) y Desvinculado (Dv) NO son ausentismo —
+  // son fin de la relación laboral, así que se excluyen a propósito.
+  const TIPOS_AUSENTISMO = ['LM', 'PF', 'F_Ju', 'F_In', 'PSGS', 'PCGS', 'DC'];
+  const ausentismoPorTipo = {};
+  for (const tipo of TIPOS_AUSENTISMO) ausentismoPorTipo[tipo] = 0;
+  for (const a of ausenciasFiltradas) {
+    if (TIPOS_AUSENTISMO.includes(a.tipo)) ausentismoPorTipo[a.tipo]++;
   }
 
   // --- Recurrencia: trabajadores con más eventos (F_In, A, permisos) ---
@@ -177,58 +251,149 @@ async function calcularIndicadores(pool, filtros) {
     }
   }
 
-  // --- Cumplimiento de dotación (por cargo, usando el requerimiento vigente a "hasta") ---
-  const { rows: requerimientos } = await pool.query(
-    `SELECT DISTINCT ON (cargo, turno) cargo, turno, cantidad_requerida
-     FROM requerimiento_dotacion WHERE vigente_desde <= $1
-     ORDER BY cargo, turno, vigente_desde DESC`,
+  // --- Cumplimiento de dotación (por cargo, día por día, respetando el
+  // descanso de cada turno para no exigir dotación en días que nadie de ese
+  // turno debería trabajar) ---
+  const { rows: historialReq } = await pool.query(
+    `SELECT cargo, turno, vigente_desde, vigente_hasta, cantidad_requerida FROM requerimiento_dotacion
+     WHERE vigente_desde <= $1 ORDER BY cargo, turno, vigente_desde ASC`,
     [hasta]
   );
-  const requeridoPorCargo = new Map();
-  for (const r of requerimientos) {
-    requeridoPorCargo.set(r.cargo, (requeridoPorCargo.get(r.cargo) || 0) + r.cantidad_requerida);
+  const historialReqPorGrupo = new Map(); // `${cargo}|${turno}` -> [{vigente_desde, vigente_hasta, cantidad_requerida}]
+  const cargosConRequerimiento = new Set();
+  for (const r of historialReq) {
+    const clave = `${r.cargo}|${r.turno}`;
+    if (!historialReqPorGrupo.has(clave)) historialReqPorGrupo.set(clave, []);
+    historialReqPorGrupo.get(clave).push(r);
+    cargosConRequerimiento.add(r.cargo);
+  }
+  function requeridoVigenteCargoTurno(cargo, turno, fecha) {
+    const registros = historialReqPorGrupo.get(`${cargo}|${turno}`) || [];
+    return valorVigenteEnFecha(registros, fecha) || 0;
   }
 
-  // Promedio de personas presentes por día, agrupado por cargo, en el rango.
-  const presentesPorCargoFecha = new Map(); // cargo -> Set('rut|fecha')
+  const fechasCumplimiento = await fechasValidas(pool, desde, hasta);
+
+  // Presentes por día, agrupados por cargo (todos los turnos juntos).
+  const presentesPorCargoDia = new Map(); // `${fecha}|${cargo}` -> Set(rut)
   for (const r of resultadosFiltrados) {
     if (!(r.marco_talana || r.marco_cencosud)) continue;
     const emp = empleadoPorRut.get(r.rut);
-    if (!emp || !emp.cargo) continue;
-    if (!presentesPorCargoFecha.has(emp.cargo)) presentesPorCargoFecha.set(emp.cargo, new Set());
-    presentesPorCargoFecha.get(emp.cargo).add(`${r.rut}|${r.fecha}`);
+    if (!emp || !emp.cargo || !cargosConRequerimiento.has(emp.cargo)) continue;
+    const clave = `${r.fecha}|${emp.cargo}`;
+    if (!presentesPorCargoDia.has(clave)) presentesPorCargoDia.set(clave, new Set());
+    presentesPorCargoDia.get(clave).add(r.rut);
   }
-  const fechasEnRango = new Set(resultadosFiltrados.map(r => r.fecha));
-  const nDias = Math.max(1, fechasEnRango.size);
 
+  const sumaRequeridoPorCargoDia = {};
+  const sumaPresentePorCargoDia = {};
+  for (const cargo of cargosConRequerimiento) { sumaRequeridoPorCargoDia[cargo] = 0; sumaPresentePorCargoDia[cargo] = 0; }
+
+  const NOMBRES_DIA_SEMANA = ['Domingo', 'Lunes', 'Martes', 'Miércoles', 'Jueves', 'Viernes', 'Sábado'];
+  const sumaRequeridoPorDiaSemana = {};
+  const sumaPresentePorDiaSemana = {};
+  for (const nombre of NOMBRES_DIA_SEMANA) { sumaRequeridoPorDiaSemana[nombre] = 0; sumaPresentePorDiaSemana[nombre] = 0; }
+
+  for (const fecha of fechasCumplimiento) {
+    const nombreDiaSemana = NOMBRES_DIA_SEMANA[new Date(fecha + 'T00:00:00').getDay()];
+    for (const cargo of cargosConRequerimiento) {
+      let requeridoDia = 0;
+      for (const clave of historialReqPorGrupo.keys()) {
+        const [c, t] = clave.split('|');
+        if (c !== cargo) continue;
+        if (esDiaLibreTipoTurno(t, fecha)) continue;
+        requeridoDia += requeridoVigenteCargoTurno(cargo, t, fecha);
+      }
+      const presenteDia = presentesPorCargoDia.get(`${fecha}|${cargo}`)?.size || 0;
+      sumaRequeridoPorCargoDia[cargo] += requeridoDia;
+      sumaPresentePorCargoDia[cargo] += presenteDia;
+      sumaRequeridoPorDiaSemana[nombreDiaSemana] += requeridoDia;
+      sumaPresentePorDiaSemana[nombreDiaSemana] += presenteDia;
+    }
+  }
+
+  // --- Ausentismo por día de la semana (¿qué día falla más la dotación?) ---
+  const ausentismoPorDiaSemana = NOMBRES_DIA_SEMANA
+    .filter(nombre => sumaRequeridoPorDiaSemana[nombre] > 0)
+    .map(nombre => {
+      const requerido = sumaRequeridoPorDiaSemana[nombre];
+      const presentes = sumaPresentePorDiaSemana[nombre];
+      const cumplimientoPct = Math.round((presentes / requerido) * 1000) / 10;
+      return {
+        dia: nombre,
+        requerido,
+        presentes,
+        cumplimiento_pct: cumplimientoPct,
+        ausentismo_pct: Math.round((100 - cumplimientoPct) * 10) / 10,
+      };
+    })
+    .sort((a, b) => b.ausentismo_pct - a.ausentismo_pct);
+
+  // --- Recursos: contratados (activos) vs requerido vigente hoy/hasta, por cargo ---
+  const { rows: requerimientoVigenteHoy } = await pool.query(
+    `SELECT DISTINCT ON (cargo, turno) cargo, turno, cantidad_requerida
+     FROM requerimiento_dotacion WHERE vigente_desde <= $1 AND (vigente_hasta IS NULL OR vigente_hasta >= $1)
+     ORDER BY cargo, turno, vigente_desde DESC`,
+    [hasta]
+  );
+  const requeridoActualPorCargo = new Map();
+  for (const r of requerimientoVigenteHoy) {
+    requeridoActualPorCargo.set(r.cargo, (requeridoActualPorCargo.get(r.cargo) || 0) + r.cantidad_requerida);
+  }
+  const contratadosPorCargo = new Map();
+  for (const emp of empleados) {
+    if (!emp.cargo) continue;
+    contratadosPorCargo.set(emp.cargo, (contratadosPorCargo.get(emp.cargo) || 0) + 1);
+  }
+  const cargosParaBrecha = new Set([...requeridoActualPorCargo.keys(), ...contratadosPorCargo.keys()]);
+  const brechaRecursos = [...cargosParaBrecha].map(cargo => {
+    const requeridoActual = requeridoActualPorCargo.get(cargo) || 0;
+    const contratados = contratadosPorCargo.get(cargo) || 0;
+    return { cargo, requerido_actual: requeridoActual, contratados, brecha: requeridoActual - contratados };
+  }).sort((a, b) => b.brecha - a.brecha);
+
+  const nDiasCumplimiento = Math.max(1, fechasCumplimiento.length);
+
+  // Totales acumulados (persona-días) del período — NO promedios. Ej: si se
+  // requieren 50 personas/día en 10 días, el requerido acumulado es 500.
   const cumplimientoDetalle = [];
-  let sumaRequerido = 0;
-  let sumaPresente = 0;
-  for (const [cargo, requerido] of requeridoPorCargo) {
-    const presentes = presentesPorCargoFecha.get(cargo)?.size || 0;
-    const promedioPresente = Math.round((presentes / nDias) * 10) / 10;
-    sumaRequerido += requerido;
-    sumaPresente += promedioPresente;
+  let requeridoTotalPeriodo = 0;
+  let presentesTotalPeriodo = 0;
+  for (const cargo of cargosConRequerimiento) {
+    const requeridoTotal = sumaRequeridoPorCargoDia[cargo];
+    const presentesTotal = sumaPresentePorCargoDia[cargo];
+    requeridoTotalPeriodo += requeridoTotal;
+    presentesTotalPeriodo += presentesTotal;
     cumplimientoDetalle.push({
       cargo,
-      requerido,
-      promedio_presente: promedioPresente,
-      cumplimiento_pct: requerido > 0 ? Math.round((promedioPresente / requerido) * 1000) / 10 : null,
+      requerido: requeridoTotal,
+      presentes: presentesTotal,
+      promedio_presente: Math.round((presentesTotal / nDiasCumplimiento) * 10) / 10,
+      cumplimiento_pct: requeridoTotal > 0 ? Math.round((presentesTotal / requeridoTotal) * 1000) / 10 : null,
     });
   }
-  const cumplimientoGeneralPct = sumaRequerido > 0 ? Math.round((sumaPresente / sumaRequerido) * 1000) / 10 : null;
+  const cumplimientoGeneralPct = requeridoTotalPeriodo > 0
+    ? Math.round((presentesTotalPeriodo / requeridoTotalPeriodo) * 1000) / 10
+    : null;
+  const ausentismoPct = cumplimientoGeneralPct !== null ? Math.round((100 - cumplimientoGeneralPct) * 10) / 10 : null;
 
   return {
-    rango: { desde, hasta, dias_evaluados: diasEvaluados },
-    presentismo_pct: presentismoPct,
+    rango: { desde, hasta, dias_evaluados: fechasCumplimiento.length },
+    dotacion_requerida: requeridoTotalPeriodo,
+    presentismo: presentesTotalPeriodo,
+    cumplimiento_dotacion_pct: cumplimientoGeneralPct,
     ausentismo_pct: ausentismoPct,
     salidas_anticipadas: salidasAnticipadas,
+    salidas_anticipadas_por_turno: salidasAnticipadasPorTurno,
     permisos_por_tipo: conteoTipos,
+    ausentismo_por_tipo: ausentismoPorTipo,
     recurrencia,
     cumplimiento_dotacion: {
       general_pct: cumplimientoGeneralPct,
       detalle: cumplimientoDetalle.sort((a, b) => (a.cumplimiento_pct ?? 0) - (b.cumplimiento_pct ?? 0)),
     },
+    ausentismo_por_dia_semana: ausentismoPorDiaSemana,
+    brecha_recursos: brechaRecursos,
     alertas_desvinculacion: {
       articulo: ARTICULO_160_N3,
       trabajadores: alertasDesvinculacion,
@@ -267,4 +432,229 @@ async function exportarReporteDesvinculacionXlsx(pool, filtros) {
   return XLSX.write(wb, { type: 'buffer', bookType: 'xlsx' });
 }
 
-module.exports = { calcularIndicadores, exportarReporteDesvinculacionXlsx };
+// Serie diaria de Requerido vs Presentes, en un rango de fechas — usada para
+// el gráfico de cumplimiento. Cargo y Turno son opcionales: si no se
+// especifican, se consolida TODO (todos los cargos y/o todos los turnos).
+// El "requerido" usa el valor vigente en CADA día (no solo el de "hasta"),
+// para reflejar correctamente si el requerimiento cambió durante el período.
+async function calcularSerieCumplimiento(pool, filtros) {
+  const { desde, hasta, cargo, jefesTurno } = filtros; // jefesTurno: array de códigos, ej. ['T_RD','T_WP'] (opcional)
+
+  const dIni = new Date(desde + 'T00:00:00');
+  const dFin = new Date(hasta + 'T00:00:00');
+  const diasTotales = Math.round((dFin - dIni) / 86400000) + 1;
+  if (diasTotales < 1 || diasTotales > 92) throw new Error('El rango debe ser de 1 a 92 días');
+
+  const fechas = await fechasValidas(pool, desde, hasta);
+
+  const filtraJefes = Array.isArray(jefesTurno) && jefesTurno.length > 0;
+
+  // Historial de requerimiento (filtrado por cargo si se indicó; el turno se
+  // resuelve más abajo día a día según los jefes de turno seleccionados).
+  let sqlReq = 'SELECT cargo, turno, vigente_desde, vigente_hasta, cantidad_requerida FROM requerimiento_dotacion WHERE 1=1';
+  const paramsReq = [];
+  if (cargo) { paramsReq.push(cargo); sqlReq += ` AND cargo = $${paramsReq.length}`; }
+  sqlReq += ' ORDER BY cargo, turno, vigente_desde ASC';
+  const { rows: historial } = await pool.query(sqlReq, paramsReq);
+
+  const historialPorGrupo = new Map(); // clave `cargo|turno` -> [{vigente_desde, vigente_hasta, cantidad_requerida}]
+  for (const r of historial) {
+    const clave = `${r.cargo}|${r.turno}`;
+    if (!historialPorGrupo.has(clave)) historialPorGrupo.set(clave, []);
+    historialPorGrupo.get(clave).push(r);
+  }
+
+  function requeridoDeTipoEn(tipoTurno, fecha) {
+    if (esDiaLibreTipoTurno(tipoTurno, fecha)) return 0;
+    let total = 0;
+    for (const [clave, registros] of historialPorGrupo) {
+      const [, t] = clave.split('|');
+      if (t !== tipoTurno) continue;
+      const vigente = valorVigenteEnFecha(registros, fecha);
+      if (vigente !== null) total += vigente;
+    }
+    return total;
+  }
+
+  function requeridoTotalEn(fecha) {
+    let total = 0;
+    for (const [clave, registros] of historialPorGrupo) {
+      const [, t] = clave.split('|');
+      if (esDiaLibreTipoTurno(t, fecha)) continue;
+      const vigente = valorVigenteEnFecha(registros, fecha);
+      if (vigente !== null) total += vigente;
+    }
+    return total;
+  }
+
+  const { rows: asignaciones } = await pool.query('SELECT rut, jefe_turno FROM jefe_turno_asignacion');
+  const jefeTurnoPorRut = new Map(asignaciones.map(a => [a.rut, a.jefe_turno]));
+  const { rows: rotacionRows } = await pool.query(
+    'SELECT DISTINCT sem, jefe_turno, rotacion_base FROM rotacion_turnos WHERE rotacion_base IS NOT NULL'
+  );
+  const rotacionBasePorClave = new Map(rotacionRows.map(r => [`${r.sem}|${r.jefe_turno}`, r.rotacion_base]));
+
+  // Presentes por día.
+  const presentesPorFecha = new Map();
+  let sqlPres = `SELECT r.rut, r.fecha
+     FROM resultado_diario r
+     JOIN empleados e ON e.rut = r.rut
+     WHERE e.activo = true AND r.fecha BETWEEN $1 AND $2 AND (r.marco_talana = 1 OR r.marco_cencosud = 1)`;
+  const paramsPres = [desde, hasta];
+  if (cargo) { paramsPres.push(cargo); sqlPres += ` AND e.cargo = $${paramsPres.length}`; }
+  const { rows: presentesRaw } = await pool.query(sqlPres, paramsPres);
+  for (const p of presentesRaw) {
+    if (filtraJefes) {
+      const codigo = jefeTurnoPorRut.get(p.rut);
+      if (!jefesTurno.includes(codigo)) continue;
+    }
+    presentesPorFecha.set(p.fecha, (presentesPorFecha.get(p.fecha) || 0) + 1);
+  }
+
+  const serie = fechas.map(f => {
+    let requerido;
+    if (filtraJefes) {
+      // Suma el requerido de los TIPOS de turno (AM/PM/NOCHE/PLANO) que
+      // resuelven los jefes de turno seleccionados ese día — sin duplicar si
+      // dos jefes seleccionados coinciden en el mismo tipo ese día.
+      const tipos = new Set();
+      for (const jt of jefesTurno) {
+        const t = determinarTipoTurno(jt, f, rotacionBasePorClave);
+        if (t) tipos.add(t);
+      }
+      requerido = [...tipos].reduce((acc, t) => acc + requeridoDeTipoEn(t, f), 0);
+    } else {
+      requerido = requeridoTotalEn(f);
+    }
+    const presente = presentesPorFecha.get(f) || 0;
+    return {
+      fecha: f,
+      requerido,
+      presentes: presente,
+      cumplimiento_pct: requerido > 0 ? Math.round((presente / requerido) * 1000) / 10 : null,
+    };
+  });
+
+  return { cargo: cargo || 'Todos', jefes_turno: filtraJefes ? jefesTurno : ['Todos'], serie };
+}
+
+// Presentismo histórico mensual, por cada uno de los cargos gerenciales fijos,
+// para un set de meses (siempre 3 consecutivos: un trimestre). Filtra por
+// Jefe de Turno específico, o "Todos" para ver el día completo (todos los
+// grupos combinados). Cada mes se promedia usando fechasValidas (domingos
+// suprimidos salvo asistencia real).
+async function calcularPresentismoHistorico(pool, filtros) {
+  const { meses, jefesTurno } = filtros; // jefesTurno: array de códigos (opcional)
+  if (!Array.isArray(meses) || meses.length === 0) throw new Error('Debes indicar al menos un mes');
+  const filtraJefes = Array.isArray(jefesTurno) && jefesTurno.length > 0;
+
+  const { rows: historial } = await pool.query(
+    `SELECT cargo, turno, vigente_desde, vigente_hasta, cantidad_requerida FROM requerimiento_dotacion
+     WHERE cargo = ANY($1::text[]) ORDER BY cargo, turno, vigente_desde ASC`,
+    [CARGOS_DASHBOARD]
+  );
+  const historialPorGrupo = new Map(); // `${cargo}|${turno}` -> [{vigente_desde, vigente_hasta, cantidad_requerida}]
+  for (const r of historial) {
+    const clave = `${r.cargo}|${r.turno}`;
+    if (!historialPorGrupo.has(clave)) historialPorGrupo.set(clave, []);
+    historialPorGrupo.get(clave).push(r);
+  }
+  function requeridoVigenteEn(cargo, turno, fecha) {
+    const registros = historialPorGrupo.get(`${cargo}|${turno}`) || [];
+    return valorVigenteEnFecha(registros, fecha) || 0;
+  }
+
+  const { rows: asignaciones } = await pool.query('SELECT rut, jefe_turno FROM jefe_turno_asignacion');
+  const jefeTurnoPorRut = new Map(asignaciones.map(a => [a.rut, a.jefe_turno]));
+  const { rows: rotacionRows } = await pool.query(
+    'SELECT DISTINCT sem, jefe_turno, rotacion_base FROM rotacion_turnos WHERE rotacion_base IS NOT NULL'
+  );
+  const rotacionBasePorClave = new Map(rotacionRows.map(r => [`${r.sem}|${r.jefe_turno}`, r.rotacion_base]));
+
+  const { rows: empleados } = await pool.query(
+    'SELECT rut, cargo FROM empleados WHERE activo = true AND cargo = ANY($1::text[])',
+    [CARGOS_DASHBOARD]
+  );
+  const cargoPorRut = new Map(empleados.map(e => [e.rut, e.cargo]));
+  const rutsRelevantes = [...cargoPorRut.keys()];
+
+  const resultado = {};
+  for (const cargo of CARGOS_DASHBOARD) resultado[cargo] = [];
+
+  for (const mes of meses) {
+    const [anio, mesNum] = mes.split('-').map(Number);
+    const desdeMes = `${mes}-01`;
+    const ultimoDia = new Date(anio, mesNum, 0).getDate();
+    const hastaMes = `${mes}-${String(ultimoDia).padStart(2, '0')}`;
+    const fechas = rutsRelevantes.length > 0 ? await fechasValidas(pool, desdeMes, hastaMes) : [];
+
+    const sumaRequeridoPorCargo = {};
+    const sumaPresentesPorCargo = {};
+    for (const cargo of CARGOS_DASHBOARD) { sumaRequeridoPorCargo[cargo] = 0; sumaPresentesPorCargo[cargo] = 0; }
+
+    let presentesPorDiaCargo = new Map(); // `${fecha}|${cargo}` -> Set(rut)
+    if (fechas.length > 0 && rutsRelevantes.length > 0) {
+      const { rows: presentesRaw } = await pool.query(
+        `SELECT rut, fecha FROM resultado_diario
+         WHERE fecha = ANY($1::text[]) AND rut = ANY($2::text[]) AND (marco_talana = 1 OR marco_cencosud = 1)`,
+        [fechas, rutsRelevantes]
+      );
+      for (const p of presentesRaw) {
+        const cargo = cargoPorRut.get(p.rut);
+        if (!cargo) continue;
+        if (filtraJefes) {
+          const codigo = jefeTurnoPorRut.get(p.rut);
+          if (!jefesTurno.includes(codigo)) continue;
+        }
+        const clave = `${p.fecha}|${cargo}`;
+        if (!presentesPorDiaCargo.has(clave)) presentesPorDiaCargo.set(clave, new Set());
+        presentesPorDiaCargo.get(clave).add(p.rut);
+      }
+    }
+
+    for (const fecha of fechas) {
+      for (const cargo of CARGOS_DASHBOARD) {
+        let requeridoDia = 0;
+        if (filtraJefes) {
+          const tipos = new Set();
+          for (const jt of jefesTurno) {
+            const t = determinarTipoTurno(jt, fecha, rotacionBasePorClave);
+            if (t) tipos.add(t);
+          }
+          for (const t of tipos) {
+            if (esDiaLibreTipoTurno(t, fecha)) continue;
+            requeridoDia += requeridoVigenteEn(cargo, t, fecha);
+          }
+        } else {
+          for (const clave of historialPorGrupo.keys()) {
+            const [c, t] = clave.split('|');
+            if (c !== cargo) continue;
+            if (esDiaLibreTipoTurno(t, fecha)) continue;
+            requeridoDia += requeridoVigenteEn(cargo, t, fecha);
+          }
+        }
+        sumaRequeridoPorCargo[cargo] += requeridoDia;
+        sumaPresentesPorCargo[cargo] += presentesPorDiaCargo.get(`${fecha}|${cargo}`)?.size || 0;
+      }
+    }
+
+    const nDias = Math.max(1, fechas.length);
+    for (const cargo of CARGOS_DASHBOARD) {
+      const promedioRequerido = Math.round((sumaRequeridoPorCargo[cargo] / nDias) * 10) / 10;
+      const promedioPresentes = Math.round((sumaPresentesPorCargo[cargo] / nDias) * 10) / 10;
+      resultado[cargo].push({
+        mes,
+        requerido: promedioRequerido,
+        presentes: promedioPresentes,
+        cumplimiento_pct: promedioRequerido > 0 ? Math.round((promedioPresentes / promedioRequerido) * 1000) / 10 : null,
+      });
+    }
+  }
+
+  return { cargos: CARGOS_DASHBOARD, meses, jefes_turno: filtraJefes ? jefesTurno : ['Todos'], resultado };
+}
+
+module.exports = {
+  calcularIndicadores, exportarReporteDesvinculacionXlsx, calcularSerieCumplimiento,
+  calcularPresentismoHistorico, CARGOS_DASHBOARD,
+};

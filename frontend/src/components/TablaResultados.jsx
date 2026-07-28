@@ -28,7 +28,7 @@ function BadgeInconsistencia({ valor }) {
   );
 }
 
-export default function TablaResultados({ refrescarSenal }) {
+export default function TablaResultados({ refrescarSenal, cdGlobal }) {
   const [filtros, setFiltros] = useState({
     rut: '', desde: '', hasta: '', soloAtrasos: false, soloInconsistencias: false, jefeTurno: '',
   });
@@ -47,6 +47,7 @@ export default function TablaResultados({ refrescarSenal }) {
         soloAtrasos: filtros.soloAtrasos ? 'true' : undefined,
         soloInconsistencias: filtros.soloInconsistencias ? 'true' : undefined,
         jefeTurno: filtros.jefeTurno || undefined,
+        cd: cdGlobal || undefined,
       });
       setDatos(res);
     } catch (err) {
@@ -54,7 +55,7 @@ export default function TablaResultados({ refrescarSenal }) {
     } finally {
       setCargando(false);
     }
-  }, [filtros]);
+  }, [filtros, cdGlobal]);
 
   useEffect(() => { cargar(); }, [cargar, refrescarSenal]);
 

@@ -29,7 +29,13 @@ async function initDb() {
       turno_texto TEXT,
       jefe TEXT,
       vigente TEXT,
-      activo BOOLEAN DEFAULT true
+      activo BOOLEAN DEFAULT true,
+      cd TEXT
+    );
+
+    CREATE TABLE IF NOT EXISTS cd_sucursal (
+      sucursal TEXT PRIMARY KEY,
+      cd TEXT NOT NULL
     );
 
     CREATE TABLE IF NOT EXISTS marcaciones_talana (
@@ -107,6 +113,10 @@ async function initDb() {
       nombre TEXT PRIMARY KEY
     );
 
+    CREATE TABLE IF NOT EXISTS cargos_requerimiento (
+      nombre TEXT PRIMARY KEY
+    );
+
     CREATE TABLE IF NOT EXISTS log_marcacion (
       id SERIAL PRIMARY KEY,
       rut TEXT,
@@ -154,12 +164,20 @@ async function initDb() {
       creado_en TIMESTAMP DEFAULT now()
     );
 
+    CREATE TABLE IF NOT EXISTS roles (
+      nombre TEXT PRIMARY KEY,
+      modulos TEXT[] DEFAULT '{}',
+      es_sistema BOOLEAN DEFAULT false,
+      creado_en TIMESTAMP DEFAULT now()
+    );
+
     CREATE TABLE IF NOT EXISTS requerimiento_dotacion (
       id SERIAL PRIMARY KEY,
       cargo TEXT NOT NULL,
       turno TEXT,
       cantidad_requerida INTEGER NOT NULL,
       vigente_desde TEXT NOT NULL,
+      vigente_hasta TEXT,
       observacion TEXT,
       creado_por TEXT,
       creado_en TIMESTAMP DEFAULT now()
@@ -198,6 +216,9 @@ async function initDb() {
   await pool.query('ALTER TABLE empleados ADD COLUMN IF NOT EXISTS motivo_inactivo TEXT');
   await pool.query('ALTER TABLE empleados ADD COLUMN IF NOT EXISTS tipo_contrato TEXT');
   await pool.query('ALTER TABLE requerimiento_dotacion ADD COLUMN IF NOT EXISTS turno TEXT');
+  await pool.query('ALTER TABLE requerimiento_dotacion ADD COLUMN IF NOT EXISTS vigente_hasta TEXT');
+  await pool.query('ALTER TABLE empleados ADD COLUMN IF NOT EXISTS cd TEXT');
+  await pool.query('ALTER TABLE usuarios ADD COLUMN IF NOT EXISTS cds_visibles TEXT[]');
   await pool.query('ALTER TABLE ausencias_permisos ADD COLUMN IF NOT EXISTS documento_id INTEGER REFERENCES documentos_respaldo(id)');
   await pool.query('ALTER TABLE ausencias_permisos ADD COLUMN IF NOT EXISTS parentesco TEXT');
   await pool.query('CREATE INDEX IF NOT EXISTS idx_requerimiento_cargo_fecha ON requerimiento_dotacion(cargo, turno, vigente_desde)');
@@ -209,6 +230,57 @@ async function initDb() {
   ];
   for (const area of areasIniciales) {
     await pool.query('INSERT INTO areas_trabajo (nombre) VALUES ($1) ON CONFLICT (nombre) DO NOTHING', [area]);
+  }
+
+  // Siembra inicial de los cargos que exige el cliente para Requerimiento de
+  // Dotación (se puede seguir agregando más desde el módulo).
+  const cargosIniciales = [
+    'ADMINISTRATIVO (A)', 'OPERADOR (A) DE MAQUINA ESPECIALIZADO', 'OPERARIO (A) MULTIFUNCIONAL',
+    'SUPERVISOR (A) SENIOR', 'JEFE DE TURNO SENIOR', 'JEFE (A) DE OPERACIONES',
+  ];
+  for (const cargo of cargosIniciales) {
+    await pool.query('INSERT INTO cargos_requerimiento (nombre) VALUES ($1) ON CONFLICT (nombre) DO NOTHING', [cargo]);
+  }
+
+  // Siembra inicial de roles. 'admin' siempre tiene todos los módulos (no se
+  // puede editar ni eliminar). Los demás perfiles se crean con una selección
+  // razonable de módulos por defecto, que el administrador puede ajustar
+  // libremente desde "Usuarios" — incluyendo crear roles nuevos.
+  const TODOS_LOS_MODULOS = [
+    'dashboard', 'resultados', 'detalle', 'reporte', 'nomina', 'asignacion', 'perfiles',
+    'requerimiento', 'ausencias', 'actualizacion', 'carga', 'usuarios',
+  ];
+  const rolesIniciales = [
+    { nombre: 'admin', modulos: TODOS_LOS_MODULOS, es_sistema: true },
+    { nombre: 'usuario', modulos: ['dashboard', 'resultados'], es_sistema: true },
+    { nombre: 'Gerente', modulos: ['dashboard', 'resultados', 'detalle', 'reporte'], es_sistema: false },
+    { nombre: 'Jefe Operaciones', modulos: ['dashboard', 'resultados', 'detalle', 'reporte', 'asignacion', 'requerimiento', 'ausencias'], es_sistema: false },
+    { nombre: 'Jefe Turno', modulos: ['dashboard', 'resultados', 'reporte', 'asignacion', 'ausencias'], es_sistema: false },
+    { nombre: 'Supervisor', modulos: ['resultados', 'reporte', 'ausencias', 'actualizacion'], es_sistema: false },
+    { nombre: 'KAM', modulos: ['dashboard', 'reporte'], es_sistema: false },
+    { nombre: 'RRHH', modulos: ['dashboard', 'resultados', 'perfiles', 'ausencias', 'requerimiento', 'nomina'], es_sistema: false },
+  ];
+  for (const r of rolesIniciales) {
+    await pool.query(
+      'INSERT INTO roles (nombre, modulos, es_sistema) VALUES ($1,$2,$3) ON CONFLICT (nombre) DO NOTHING',
+      [r.nombre, r.modulos, r.es_sistema]
+    );
+  }
+
+  // Siembra inicial del mapeo Sucursal -> CD (varias sucursales pueden
+  // apuntar al mismo CD). Se puede seguir ajustando desde el módulo de CDs.
+  const mapeoCdInicial = [
+    ['MC CD PARIS', 'MC CD PARIS'],
+    ['MC CD SAN IGNACIO', 'MC CD SAN IGNACIO'],
+    ['MC CD ENEA', 'MC CD ENEA'],
+    ['MC CD JUNCAL', 'MC CD JUNCAL'],
+    ['MC CENCOSUD SAN IGNACIO', 'MC CD SAN IGNACIO'],
+    ['MC CENCOSUD EL JUNCAL', 'MC CD JUNCAL'],
+    ['MC CENCOSUD BODEGAS PARIS', 'MC CD PARIS'],
+    ['MC SAN IGNACIO CD EST', 'MC CD SAN IGNACIO'],
+  ];
+  for (const [sucursal, cd] of mapeoCdInicial) {
+    await pool.query('INSERT INTO cd_sucursal (sucursal, cd) VALUES ($1,$2) ON CONFLICT (sucursal) DO NOTHING', [sucursal, cd]);
   }
 
   // Usuario administrador inicial, creado desde variables de entorno.

@@ -2,7 +2,202 @@ import { useState, useEffect, useCallback } from 'react';
 import {
   buscarEmpleados, crearEmpleado, actualizarEmpleado,
   listarAreas, crearArea, eliminarArea, listarCargos, activarEmpleadosMasivo, actualizarAreasMasivo,
+  actualizarJefeTurnoMasivo, listarMapeoCdSucursal, guardarMapeoCdSucursal, eliminarMapeoCdSucursal, recalcularCd,
+  listarSucursalesSinMapear,
 } from '../api';
+
+function PanelMapeoCd() {
+  const [mapeo, setMapeo] = useState([]);
+  const [sucursal, setSucursal] = useState('');
+  const [cd, setCd] = useState('');
+  const [guardando, setGuardando] = useState(false);
+  const [error, setError] = useState(null);
+  const [recalculando, setRecalculando] = useState(false);
+  const [mensajeRecalculo, setMensajeRecalculo] = useState(null);
+  const [sinMapear, setSinMapear] = useState([]);
+
+  const cargar = useCallback(async () => {
+    try {
+      setMapeo(await listarMapeoCdSucursal());
+    } catch (err) {
+      setError(err.message);
+    }
+  }, []);
+
+  const cargarSinMapear = useCallback(async () => {
+    try {
+      setSinMapear(await listarSucursalesSinMapear());
+    } catch (err) {
+      // silencioso: no es crítico si esto falla
+    }
+  }, []);
+
+  useEffect(() => { cargar(); cargarSinMapear(); }, [cargar, cargarSinMapear]);
+
+  async function recalcular() {
+    setRecalculando(true);
+    setError(null);
+    setMensajeRecalculo(null);
+    try {
+      const resultado = await recalcularCd();
+      setMensajeRecalculo(`✓ ${resultado.empleados_con_cd} trabajadores quedaron con CD asignado.`);
+      cargarSinMapear();
+    } catch (err) {
+      setError(err.message);
+    } finally {
+      setRecalculando(false);
+    }
+  }
+
+  async function agregar(e) {
+    e.preventDefault();
+    if (!sucursal.trim() || !cd.trim()) return;
+    setGuardando(true);
+    setError(null);
+    try {
+      await guardarMapeoCdSucursal(sucursal.trim(), cd.trim());
+      setSucursal(''); setCd('');
+      cargar();
+    } catch (err) {
+      setError(err.message);
+    } finally {
+      setGuardando(false);
+    }
+  }
+
+  async function quitar(suc) {
+    setError(null);
+    try {
+      await eliminarMapeoCdSucursal(suc);
+      cargar();
+    } catch (err) {
+      setError(err.message);
+    }
+  }
+
+  return (
+    <div className="card" style={{ marginBottom: 20 }}>
+      <h2>Mapeo Sucursal → CD</h2>
+      <p className="card-desc">
+        Cada vez que subes Talana, el sistema asigna el CD de cada trabajador según la columna
+        "Sucursal" de la marcación, usando esta tabla. Agrega aquí las sucursales nuevas que
+        aparezcan (varias sucursales pueden apuntar al mismo CD).
+      </p>
+
+      <div style={{ background: 'var(--surface-2)', border: '1px solid var(--border)', borderRadius: 8, padding: 12, marginBottom: 16 }}>
+        <p style={{ fontSize: '0.8rem', color: 'var(--text-muted)', margin: '0 0 8px' }}>
+          Si ya subiste Talana pero algunos trabajadores no muestran CD (o el filtro de CD no trae
+          datos), usa este botón para recalcularlo con el mapeo actual — no hace falta volver a
+          subir los archivos.
+        </p>
+        <button className="btn" type="button" disabled={recalculando} onClick={recalcular}>
+          {recalculando ? 'Recalculando…' : 'Recalcular CD de todos los trabajadores'}
+        </button>
+        {mensajeRecalculo && <p className="status-msg ok" style={{ marginTop: 8 }}>{mensajeRecalculo}</p>}
+      </div>
+
+      {sinMapear.length > 0 && (
+        <div style={{ background: 'rgba(233,162,59,0.1)', border: '1px solid var(--warn)', borderRadius: 8, padding: 12, marginBottom: 16 }}>
+          <p style={{ fontSize: '0.82rem', color: 'var(--warn)', margin: '0 0 8px', fontWeight: 600 }}>
+            ⚠ Hay {sinMapear.length} sucursal(es) en Talana sin CD asignado — agrégalas abajo:
+          </p>
+          <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8 }}>
+            {sinMapear.map(s => (
+              <button
+                key={s.sucursal} type="button"
+                onClick={() => { setSucursal(s.sucursal); setCd(''); }}
+                className="badge badge-warn"
+                style={{ border: 'none', cursor: 'pointer', padding: '5px 10px' }}
+                title="Click para copiar al formulario de abajo"
+              >
+                {s.sucursal} ({s.trabajadores} trab.)
+              </button>
+            ))}
+          </div>
+        </div>
+      )}
+
+      <form onSubmit={agregar} style={{ display: 'flex', gap: 10, marginBottom: 14, flexWrap: 'wrap' }}>
+        <input type="text" placeholder="Sucursal (tal como viene en Talana)" value={sucursal} onChange={e => setSucursal(e.target.value)} className="file-input" style={{ maxWidth: 260 }} />
+        <input type="text" placeholder="CD (nombre agrupado)" value={cd} onChange={e => setCd(e.target.value)} className="file-input" style={{ maxWidth: 200 }} />
+        <button className="btn" type="submit" disabled={guardando}>{guardando ? 'Guardando…' : 'Agregar / Actualizar'}</button>
+      </form>
+
+      {error && <p className="status-msg error">{error}</p>}
+
+      <div className="table-scroll" style={{ maxHeight: '30vh' }}>
+        <table>
+          <thead><tr><th>Sucursal</th><th>CD</th><th></th></tr></thead>
+          <tbody>
+            {mapeo.map(m => (
+              <tr key={m.sucursal}>
+                <td style={{ fontFamily: 'var(--font-sans)' }}>{m.sucursal}</td>
+                <td style={{ fontFamily: 'var(--font-sans)' }}>{m.cd}</td>
+                <td>
+                  <button type="button" onClick={() => quitar(m.sucursal)} style={{ background: 'none', border: 'none', color: 'var(--danger)', cursor: 'pointer', fontSize: '0.78rem' }}>
+                    Quitar
+                  </button>
+                </td>
+              </tr>
+            ))}
+            {mapeo.length === 0 && <tr><td colSpan={3} className="empty-state">Sin mapeos todavía.</td></tr>}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  );
+}
+
+function PanelActualizacionJefeTurno() {
+  const [file, setFile] = useState(null);
+  const [cargando, setCargando] = useState(false);
+  const [error, setError] = useState(null);
+  const [resultado, setResultado] = useState(null);
+
+  async function procesar() {
+    if (!file) return;
+    setCargando(true);
+    setError(null);
+    setResultado(null);
+    try {
+      const data = await actualizarJefeTurnoMasivo(file);
+      setResultado(data);
+      setFile(null);
+    } catch (err) {
+      setError(err.message);
+    } finally {
+      setCargando(false);
+    }
+  }
+
+  return (
+    <div className="card" style={{ marginBottom: 20 }}>
+      <h2>Actualizar Jefe de Turno (masivo)</h2>
+      <p className="card-desc">
+        Sube un archivo con columnas <strong>RUT</strong> y <strong>JEFE TURNO</strong> (valores:
+        T_RD, T_BV, T_WP, o CG para turno Plano). Corrige de una vez a los trabajadores que
+        aparecen como "Sin asignar" en los reportes.
+      </p>
+      <div style={{ display: 'flex', gap: 10, alignItems: 'center', flexWrap: 'wrap' }}>
+        <input
+          type="file" accept=".xlsx,.xlsm,.xls"
+          className={`file-input ${file ? 'filled' : ''}`}
+          style={{ maxWidth: 320 }}
+          onChange={e => { setFile(e.target.files[0] || null); setResultado(null); setError(null); }}
+        />
+        <button className="btn" type="button" disabled={!file || cargando} onClick={procesar}>
+          {cargando ? 'Procesando…' : 'Actualizar Jefes de Turno'}
+        </button>
+      </div>
+      {error && <p className="status-msg error" style={{ marginTop: 10 }}>{error}</p>}
+      {resultado && (
+        <p className="status-msg ok" style={{ marginTop: 10 }}>
+          ✓ {resultado.filas_en_archivo} filas en el archivo · {resultado.actualizados} trabajadores actualizados
+        </p>
+      )}
+    </div>
+  );
+}
 
 function PanelActualizacionAreas({ onCambio }) {
   const [file, setFile] = useState(null);
@@ -362,7 +557,7 @@ function PanelAreas({ areas, onCambio }) {
   );
 }
 
-export default function PerfilTrabajador() {
+export default function PerfilTrabajador({ cdGlobal }) {
   const [areas, setAreas] = useState([]);
   const [cargos, setCargos] = useState([]);
   const [query, setQuery] = useState('');
@@ -388,7 +583,7 @@ export default function PerfilTrabajador() {
     const timer = setTimeout(async () => {
       setBuscando(true);
       try {
-        setResultados(await buscarEmpleados(query));
+        setResultados(await buscarEmpleados(query, cdGlobal || undefined));
       } catch (err) {
         setError(err.message);
       } finally {
@@ -400,13 +595,15 @@ export default function PerfilTrabajador() {
 
   async function refrescarBusqueda() {
     setEditando(null);
-    if (query.trim().length >= 2) setResultados(await buscarEmpleados(query));
+    if (query.trim().length >= 2) setResultados(await buscarEmpleados(query, cdGlobal || undefined));
   }
 
   return (
     <>
       <PanelActivacionMasiva />
+      <PanelMapeoCd />
       <PanelActualizacionAreas onCambio={cargarAreas} />
+      <PanelActualizacionJefeTurno />
       <PanelAreas areas={areas} onCambio={cargarAreas} />
 
       {mostrarCreacion && (

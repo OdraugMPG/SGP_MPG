@@ -14,6 +14,7 @@ const ETIQUETA_TIPO = {
   P: 'Presente', F_Ju: 'Falta Justificada', F_In: 'Falta Injustificada',
   PSGS: 'Permiso S/Goce', PCGS: 'Permiso C/Goce', DC: 'Día Compensatorio',
   V: 'Vacaciones', R: 'Renuncia', Dv: 'Desvinculado', A: 'Ausente', LM: 'Licencia Médica',
+  PF: 'Permiso por Fallecimiento',
 };
 
 function TarjetaKpi({ titulo, valor, sufijo = '', color }) {
@@ -25,7 +26,7 @@ function TarjetaKpi({ titulo, valor, sufijo = '', color }) {
   );
 }
 
-export default function PanelIndicadores() {
+export default function PanelIndicadores({ cd }) {
   const [desde, setDesde] = useState(primerDiaMesISO());
   const [hasta, setHasta] = useState(hoyISO());
   const [datos, setDatos] = useState(null);
@@ -36,15 +37,15 @@ export default function PanelIndicadores() {
     setCargando(true);
     setError(null);
     try {
-      setDatos(await obtenerIndicadores(desde, hasta));
+      setDatos(await obtenerIndicadores(desde, hasta, undefined, cd || undefined));
     } catch (err) {
       setError(err.message);
     } finally {
       setCargando(false);
     }
-  }, [desde, hasta]);
+  }, [desde, hasta, cd]);
 
-  useEffect(() => { cargar(); }, []); // eslint-disable-line react-hooks/exhaustive-deps
+  useEffect(() => { cargar(); }, [cargar]);
 
   return (
     <div className="card" style={{ marginBottom: 20 }}>
@@ -70,27 +71,36 @@ export default function PanelIndicadores() {
       {datos && (
         <>
           <div className="summary-grid">
-            <TarjetaKpi titulo="Cumplimiento dotación" valor={datos.cumplimiento_dotacion.general_pct} sufijo="%"
-              color={datos.cumplimiento_dotacion.general_pct !== null && datos.cumplimiento_dotacion.general_pct < 90 ? 'var(--danger)' : 'var(--ok)'} />
-            <TarjetaKpi titulo="Presentismo" valor={datos.presentismo_pct} sufijo="%" color="var(--ok)" />
-            <TarjetaKpi titulo="Ausentismo" valor={datos.ausentismo_pct} sufijo="%" color="var(--warn)" />
+            <TarjetaKpi titulo="Dotación requerida" valor={datos.dotacion_requerida} />
+            <TarjetaKpi titulo="Cumplimiento dotación" valor={datos.cumplimiento_dotacion_pct} sufijo="%"
+              color={datos.cumplimiento_dotacion_pct !== null && datos.cumplimiento_dotacion_pct < 90 ? 'var(--danger)' : 'var(--ok)'} />
+            <TarjetaKpi titulo="Ausentismo (incumplimiento)" valor={datos.ausentismo_pct} sufijo="%" color="var(--warn)" />
             <TarjetaKpi titulo="Salidas anticipadas" valor={datos.salidas_anticipadas} />
             <TarjetaKpi titulo="Licencias médicas" valor={datos.permisos_por_tipo.LM || 0} />
             <TarjetaKpi titulo="Permisos (todos)" valor={
               (datos.permisos_por_tipo.PSGS || 0) + (datos.permisos_por_tipo.PCGS || 0) + (datos.permisos_por_tipo.DC || 0)
             } />
           </div>
+          <p style={{ fontSize: '0.76rem', color: 'var(--text-muted)', marginTop: 6, marginBottom: 0 }}>
+            Dotación requerida es el total acumulado del período (persona-días), no un promedio diario.
+            Ausentismo = 100% − Cumplimiento (la brecha entre lo requerido y lo presente). Solo se cuentan
+            los cargos con requerimiento de dotación registrado.
+          </p>
 
           {/* Cumplimiento de dotación por cargo */}
           <h3 style={{ marginTop: 24, marginBottom: 8, fontSize: '0.9rem' }}>Cumplimiento de dotación por cargo</h3>
+          <p style={{ fontSize: '0.76rem', color: 'var(--text-muted)', marginTop: 0, marginBottom: 8 }}>
+            Requerido y Presentes son totales del período (persona-días acumulados).
+          </p>
           <div className="table-scroll" style={{ maxHeight: '30vh' }}>
             <table>
-              <thead><tr><th>Cargo</th><th>Requerido</th><th>Promedio presente/día</th><th>Cumplimiento</th></tr></thead>
+              <thead><tr><th>Cargo</th><th>Requerido (total)</th><th>Presentes (total)</th><th>Promedio/día</th><th>Cumplimiento</th></tr></thead>
               <tbody>
                 {datos.cumplimiento_dotacion.detalle.map(d => (
                   <tr key={d.cargo}>
                     <td style={{ fontFamily: 'var(--font-sans)' }}>{d.cargo}</td>
                     <td>{d.requerido}</td>
+                    <td>{d.presentes}</td>
                     <td>{d.promedio_presente}</td>
                     <td>
                       {d.cumplimiento_pct === null ? '—' : (
@@ -102,21 +112,101 @@ export default function PanelIndicadores() {
                   </tr>
                 ))}
                 {datos.cumplimiento_dotacion.detalle.length === 0 && (
-                  <tr><td colSpan={4} className="empty-state">Aún no hay requerimiento de dotación registrado.</td></tr>
+                  <tr><td colSpan={5} className="empty-state">Aún no hay requerimiento de dotación registrado.</td></tr>
+                )}
+              </tbody>
+            </table>
+          </div>
+          {datos.cumplimiento_dotacion.detalle.length > 0 && (
+            <p style={{ fontSize: '0.8rem', marginTop: 8 }}>
+              Cargo con más ausentismo: <strong style={{ fontFamily: 'var(--font-sans)' }}>{datos.cumplimiento_dotacion.detalle[0].cargo}</strong>{' '}
+              <span className="badge badge-danger">
+                {datos.cumplimiento_dotacion.detalle[0].cumplimiento_pct === null ? '—' : `${Math.round((100 - datos.cumplimiento_dotacion.detalle[0].cumplimiento_pct) * 10) / 10}% ausentismo`}
+              </span>
+            </p>
+          )}
+
+          {/* Ausentismo por día de la semana */}
+          <h3 style={{ marginTop: 24, marginBottom: 8, fontSize: '0.9rem' }}>Ausentismo por día de la semana</h3>
+          <div className="table-scroll" style={{ maxHeight: '30vh' }}>
+            <table>
+              <thead><tr><th>Día</th><th>Requerido (total)</th><th>Presentes (total)</th><th>Ausentismo</th></tr></thead>
+              <tbody>
+                {(datos.ausentismo_por_dia_semana || []).map((d, i) => (
+                  <tr key={d.dia} style={i === 0 ? { background: 'rgba(214,84,79,0.08)' } : undefined}>
+                    <td style={{ fontFamily: 'var(--font-sans)' }}>
+                      {d.dia}{i === 0 && <span className="badge badge-danger" style={{ marginLeft: 8 }}>Peor día</span>}
+                    </td>
+                    <td>{d.requerido}</td>
+                    <td>{d.presentes}</td>
+                    <td>{d.ausentismo_pct}%</td>
+                  </tr>
+                ))}
+                {(!datos.ausentismo_por_dia_semana || datos.ausentismo_por_dia_semana.length === 0) && (
+                  <tr><td colSpan={4} className="empty-state">Sin datos suficientes en el período.</td></tr>
                 )}
               </tbody>
             </table>
           </div>
 
-          {/* Permisos por tipo */}
-          <h3 style={{ marginTop: 24, marginBottom: 8, fontSize: '0.9rem' }}>Permisos y ausencias por tipo</h3>
+          {/* Brecha de recursos: contratados vs requerido actual */}
+          <h3 style={{ marginTop: 24, marginBottom: 8, fontSize: '0.9rem' }}>Recursos necesarios para cubrir la dotación</h3>
+          <p style={{ fontSize: '0.76rem', color: 'var(--text-muted)', marginTop: 0, marginBottom: 8 }}>
+            Requerido vigente hoy vs. trabajadores activos contratados, por cargo — cuántos faltan por contratar (o sobran).
+          </p>
+          <div className="table-scroll" style={{ maxHeight: '30vh' }}>
+            <table>
+              <thead><tr><th>Cargo</th><th>Requerido (actual)</th><th>Contratados</th><th>Brecha</th></tr></thead>
+              <tbody>
+                {(datos.brecha_recursos || []).map(d => (
+                  <tr key={d.cargo}>
+                    <td style={{ fontFamily: 'var(--font-sans)' }}>{d.cargo}</td>
+                    <td>{d.requerido_actual}</td>
+                    <td>{d.contratados}</td>
+                    <td>
+                      {d.brecha > 0 ? (
+                        <span className="badge badge-danger">Faltan {d.brecha}</span>
+                      ) : d.brecha < 0 ? (
+                        <span className="badge badge-muted">Sobran {Math.abs(d.brecha)}</span>
+                      ) : (
+                        <span className="badge badge-ok">Completo</span>
+                      )}
+                    </td>
+                  </tr>
+                ))}
+                {(!datos.brecha_recursos || datos.brecha_recursos.length === 0) && (
+                  <tr><td colSpan={4} className="empty-state">Sin datos de requerimiento o dotación configurados.</td></tr>
+                )}
+              </tbody>
+            </table>
+          </div>
+
+          {/* Salidas anticipadas por turno */}
+          <h3 style={{ marginTop: 24, marginBottom: 8, fontSize: '0.9rem' }}>Salidas anticipadas por turno</h3>
           <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8, marginBottom: 8 }}>
-            {Object.entries(datos.permisos_por_tipo).map(([tipo, n]) => (
+            {Object.entries(datos.salidas_anticipadas_por_turno || {}).map(([turno, n]) => (
+              <span key={turno} className="badge badge-warn" style={{ padding: '5px 10px' }}>
+                {turno}: <strong>{n}</strong>
+              </span>
+            ))}
+            {Object.keys(datos.salidas_anticipadas_por_turno || {}).length === 0 && (
+              <span className="status-msg">Sin salidas anticipadas en el período.</span>
+            )}
+          </div>
+
+          {/* Ausentismo por tipo (curado, excluye R y Dv) */}
+          <h3 style={{ marginTop: 24, marginBottom: 4, fontSize: '0.9rem' }}>Ausentismo por tipo</h3>
+          <p style={{ fontSize: '0.76rem', color: 'var(--text-muted)', marginTop: 0, marginBottom: 8 }}>
+            Solo causales de ausentismo real (Licencia Médica, Permiso por Fallecimiento, Falta
+            Justificada/Injustificada, Permisos, Día Compensatorio). Renuncia y Desvinculado quedan
+            fuera porque no son ausentismo — son fin de la relación laboral.
+          </p>
+          <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8, marginBottom: 8 }}>
+            {Object.entries(datos.ausentismo_por_tipo || {}).map(([tipo, n]) => (
               <span key={tipo} className="badge badge-muted" style={{ padding: '5px 10px' }}>
                 {ETIQUETA_TIPO[tipo] || tipo}: <strong>{n}</strong>
               </span>
             ))}
-            {Object.keys(datos.permisos_por_tipo).length === 0 && <span className="status-msg">Sin registros en el período.</span>}
           </div>
 
           {/* Recurrencia */}

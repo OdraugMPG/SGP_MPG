@@ -9,7 +9,7 @@ function etiquetaTurno(tipoTurno) {
 }
 
 async function calcularMatrizAsistencia(pool, filtros) {
-  const { desde, hasta, area } = filtros;
+  const { desde, hasta, area, cds } = filtros; // cds: null (todos) o arreglo de CDs permitidos/solicitados
 
   const dIni = new Date(desde + 'T00:00:00');
   const dFin = new Date(hasta + 'T00:00:00');
@@ -23,9 +23,10 @@ async function calcularMatrizAsistencia(pool, filtros) {
     fechas.push(d.toISOString().slice(0, 10));
   }
 
-  let sqlEmp = 'SELECT rut, nombre, apellido_paterno, cargo, centro_costo FROM empleados WHERE activo = true';
+  let sqlEmp = 'SELECT rut, nombre, apellido_paterno, cargo, centro_costo, cd FROM empleados WHERE activo = true';
   const paramsEmp = [];
   if (area) { paramsEmp.push(area); sqlEmp += ` AND centro_costo = $${paramsEmp.length}`; }
+  if (cds) { paramsEmp.push(cds); sqlEmp += ` AND cd = ANY($${paramsEmp.length}::text[])`; }
   sqlEmp += ' ORDER BY nombre';
   const { rows: empleados } = await pool.query(sqlEmp, paramsEmp);
 
@@ -100,6 +101,7 @@ async function calcularMatrizAsistencia(pool, filtros) {
       nombre: `${emp.nombre} ${emp.apellido_paterno || ''}`.trim(),
       cargo: emp.cargo,
       area: emp.centro_costo,
+      cd: emp.cd,
       jefe_turno: codigoJefeTurno || null,
       turno: etiquetaTurno(determinarTipoTurno(codigoJefeTurno, fechas[0], rotacionBasePorClave)),
       estados,

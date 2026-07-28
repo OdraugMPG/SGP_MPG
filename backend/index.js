@@ -6,12 +6,13 @@ const fs = require('fs');
 require('dotenv').config();
 
 const { initDb } = require('./db');
-const { cargarTodo, cargarTalanaIncremental, cargarCencosudIncremental, activarEmpleadosDesdeArchivo, actualizarAreasDesdeArchivo } = require('./importar');
+const { cargarTodo, cargarTalanaIncremental, cargarCencosudIncremental, activarEmpleadosDesdeArchivo, actualizarAreasDesdeArchivo, actualizarJefeTurnoDesdeArchivo, actualizarCdDesdeMarcaciones } = require('./importar');
 const { calcularResultados } = require('./calcular');
 const { generarReporteDiario, exportarReporteDiarioXlsx, obtenerLogMarcacion } = require('./reporteDiario');
 const { generarReporteEmpleadoPDF, generarReportePorJefeTurnoPDF } = require('./reporteEmpleadoPDF');
 const { generarDetalleMarcaciones, exportarDetalleMarcacionesXlsx } = require('./detalleMarcaciones');
-const { calcularIndicadores, exportarReporteDesvinculacionXlsx } = require('./indicadores');
+const { calcularCierreNomina, exportarCierreNominaXlsx } = require('./cierreNomina');
+const { calcularIndicadores, exportarReporteDesvinculacionXlsx, calcularSerieCumplimiento, calcularPresentismoHistorico, CARGOS_DASHBOARD } = require('./indicadores');
 const { calcularMatrizAsistencia, exportarMatrizAsistenciaXlsx } = require('./dashboardAsistencia');
 const { DIAS_FALLECIMIENTO, calcularFechaFinFallecimiento } = require('./permisoFallecimiento');
 const { semanaISO, diaDeSemana, resolverJefeTurno, sumarDias, determinarTipoTurno, contratoDesdeRazonSocial } = require('./importar');
@@ -46,6 +47,65 @@ app.post('/api/auth/login', async (req, res) => {
 
 // A partir de aquí, todas las rutas /api/* requieren un token válido.
 app.use('/api', requireAuth);
+
+// Middleware: exige que el ROL del usuario logueado tenga habilitado el
+// módulo indicado (consultando la tabla roles). 'admin' siempre pasa, sin
+// importar qué módulos tenga configurados. Esto refuerza a nivel de backend
+// lo que en el frontend ya se ve como pestañas ocultas — así un usuario no
+// puede saltarse el control llamando la URL directamente.
+// Resuelve la lista de CDs que debe usarse para filtrar una consulta, según
+// lo que el usuario PIDIÓ (cdSolicitado, puede venir vacío = "Todos") y lo
+// que su cuenta tiene PERMITIDO ver (cds_visibles). Devuelve:
+//  - null: sin restricción, mostrar todos los CDs (admin, o usuario sin cds_visibles configurados y sin pedir uno específico)
+//  - []: el usuario pidió un CD al que no tiene acceso (bloquear, mostrar vacío)
+//  - [cd1, cd2, ...]: filtrar solo a estos CDs
+async function resolverCdsFiltro(req, cdSolicitado) {
+  let permitidos = null;
+  if (req.usuario.rol !== 'admin') {
+    const { rows } = await pool.query('SELECT cds_visibles FROM usuarios WHERE id = $1', [req.usuario.id]);
+    const propios = rows[0]?.cds_visibles || [];
+    if (propios.length > 0) permitidos = propios;
+  }
+  if (cdSolicitado) {
+    if (permitidos && !permitidos.includes(cdSolicitado)) return [];
+    return [cdSolicitado];
+  }
+  return permitidos; // null = todos, o el arreglo de CDs permitidos del usuario
+}
+
+function moduloRequerido(clave) {
+  return async (req, res, next) => {
+    try {
+      if (req.usuario.rol === 'admin') return next();
+      const { rows } = await pool.query('SELECT modulos FROM roles WHERE nombre = $1', [req.usuario.rol]);
+      const modulos = rows[0]?.modulos || [];
+      if (modulos.includes(clave)) return next();
+      return res.status(403).json({ error: `Tu rol ("${req.usuario.rol}") no tiene acceso a este módulo.` });
+    } catch (err) {
+      console.error(err);
+      res.status(500).json({ error: err.message });
+    }
+  };
+}
+
+// Rutas con prefijo exclusivo de un solo módulo: se protegen todas de una vez.
+// (Rutas compartidas entre varios módulos, como la búsqueda de empleados o
+// las listas de áreas/cargos, quedan sin restringir a propósito — son datos
+// de referencia de solo lectura que varios módulos necesitan consultar.)
+app.use('/api/reporte-diario', moduloRequerido('reporte'));
+app.use('/api/cierre-nomina', moduloRequerido('nomina'));
+app.use('/api/reporte-empleado', moduloRequerido('reporte'));
+app.use('/api/reporte-jefe-turno', moduloRequerido('reporte'));
+app.use('/api/ausencias', moduloRequerido('ausencias'));
+app.use('/api/detalle-marcaciones', moduloRequerido('detalle'));
+app.use('/api/indicadores', moduloRequerido('dashboard'));
+app.use('/api/dashboard-asistencia', moduloRequerido('dashboard'));
+app.use('/api/requerimiento-dotacion', moduloRequerido('requerimiento'));
+app.use('/api/cargos-requerimiento', moduloRequerido('requerimiento'));
+app.use('/api/actualizar', moduloRequerido('actualizacion'));
+app.use('/api/importar', moduloRequerido('carga'));
+app.use('/api/jefe-turno', moduloRequerido('asignacion'));
+
 
 app.post('/api/importar', upload.fields([
   { name: 'maestro', maxCount: 1 },
@@ -87,9 +147,12 @@ app.post('/api/importar', upload.fields([
 
 app.get('/api/resultados', async (req, res) => {
   try {
-    const { rut, desde, hasta, soloAtrasos, soloInconsistencias, jefeTurno } = req.query;
+    const { rut, desde, hasta, soloAtrasos, soloInconsistencias, jefeTurno, cd } = req.query;
+    const cdsFiltro = await resolverCdsFiltro(req, cd);
+
     let sql = `SELECT r.* FROM resultado_diario r`;
     if (jefeTurno) sql += ` JOIN jefe_turno_asignacion jt ON jt.rut = r.rut`;
+    if (cdsFiltro) sql += ` JOIN empleados emp_cd ON emp_cd.rut = r.rut`;
     sql += ' WHERE 1=1';
     const params = [];
 
@@ -99,6 +162,7 @@ app.get('/api/resultados', async (req, res) => {
     if (soloAtrasos === 'true') sql += ' AND r.minutos_atraso > 0';
     if (soloInconsistencias === 'true') sql += ' AND r.inconsistencia IS NOT NULL';
     if (jefeTurno) { params.push(jefeTurno); sql += ` AND jt.jefe_turno = $${params.length}`; }
+    if (cdsFiltro) { params.push(cdsFiltro); sql += ` AND emp_cd.cd = ANY($${params.length}::text[])`; }
 
     sql += ' ORDER BY r.fecha DESC, r.rut LIMIT 1000';
 
@@ -126,10 +190,11 @@ app.get('/api/empleados/:rut', async (req, res) => {
 
 app.get('/api/reporte-diario', async (req, res) => {
   try {
-    const { fecha, excluirAreas } = req.query;
+    const { fecha, excluirAreas, cd } = req.query;
     if (!fecha) return res.status(400).json({ error: 'Falta el parámetro fecha (YYYY-MM-DD)' });
     const areasExcluidas = excluirAreas ? excluirAreas.split(',').filter(Boolean) : [];
-    const filas = await generarReporteDiario(pool, fecha, { excluirAreas: areasExcluidas });
+    const cdsFiltro = await resolverCdsFiltro(req, cd);
+    const filas = await generarReporteDiario(pool, fecha, { excluirAreas: areasExcluidas, cds: cdsFiltro });
     res.json(filas);
   } catch (err) {
     console.error(err);
@@ -139,10 +204,11 @@ app.get('/api/reporte-diario', async (req, res) => {
 
 app.get('/api/reporte-diario/export', async (req, res) => {
   try {
-    const { fecha, excluirAreas } = req.query;
+    const { fecha, excluirAreas, cd } = req.query;
     if (!fecha) return res.status(400).json({ error: 'Falta el parámetro fecha (YYYY-MM-DD)' });
     const areasExcluidas = excluirAreas ? excluirAreas.split(',').filter(Boolean) : [];
-    const buffer = await exportarReporteDiarioXlsx(pool, fecha, { excluirAreas: areasExcluidas });
+    const cdsFiltro = await resolverCdsFiltro(req, cd);
+    const buffer = await exportarReporteDiarioXlsx(pool, fecha, { excluirAreas: areasExcluidas, cds: cdsFiltro });
     res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
     res.setHeader('Content-Disposition', `attachment; filename="ReporteDiario_${fecha}.xlsx"`);
     res.send(buffer);
@@ -376,9 +442,10 @@ app.get('/api/ausencias/documento/:id', async (req, res) => {
 
 app.get('/api/detalle-marcaciones', async (req, res) => {
   try {
-    const { rut, desde, hasta } = req.query;
+    const { rut, desde, hasta, cd } = req.query;
     if (!desde || !hasta) return res.status(400).json({ error: 'desde y hasta son requeridos (YYYY-MM-DD)' });
-    const filas = await generarDetalleMarcaciones(pool, { rut, desde, hasta });
+    const cdsFiltro = await resolverCdsFiltro(req, cd);
+    const filas = await generarDetalleMarcaciones(pool, { rut, desde, hasta, cds: cdsFiltro });
     res.json(filas);
   } catch (err) {
     console.error(err);
@@ -388,9 +455,10 @@ app.get('/api/detalle-marcaciones', async (req, res) => {
 
 app.get('/api/detalle-marcaciones/export', async (req, res) => {
   try {
-    const { rut, desde, hasta } = req.query;
+    const { rut, desde, hasta, cd } = req.query;
     if (!desde || !hasta) return res.status(400).json({ error: 'desde y hasta son requeridos (YYYY-MM-DD)' });
-    const buffer = await exportarDetalleMarcacionesXlsx(pool, { rut, desde, hasta });
+    const cdsFiltro = await resolverCdsFiltro(req, cd);
+    const buffer = await exportarDetalleMarcacionesXlsx(pool, { rut, desde, hasta, cds: cdsFiltro });
     res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
     res.setHeader('Content-Disposition', `attachment; filename="DetalleMarcaciones_${desde}_a_${hasta}.xlsx"`);
     res.send(buffer);
@@ -400,11 +468,72 @@ app.get('/api/detalle-marcaciones/export', async (req, res) => {
   }
 });
 
+app.get('/api/cierre-nomina', async (req, res) => {
+  try {
+    const { desde, hasta, cd } = req.query;
+    if (!desde || !hasta) return res.status(400).json({ error: 'desde y hasta son requeridos (YYYY-MM-DD)' });
+    const cdsFiltro = await resolverCdsFiltro(req, cd);
+    const filas = await calcularCierreNomina(pool, { desde, hasta, cds: cdsFiltro });
+    res.json(filas);
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.get('/api/cierre-nomina/export', async (req, res) => {
+  try {
+    const { desde, hasta, cd } = req.query;
+    if (!desde || !hasta) return res.status(400).json({ error: 'desde y hasta son requeridos (YYYY-MM-DD)' });
+    const cdsFiltro = await resolverCdsFiltro(req, cd);
+    const buffer = await exportarCierreNominaXlsx(pool, { desde, hasta, cds: cdsFiltro });
+    res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
+    res.setHeader('Content-Disposition', `attachment; filename="CierreNomina_${desde}_a_${hasta}.xlsx"`);
+    res.send(buffer);
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
 app.get('/api/indicadores', async (req, res) => {
   try {
-    const { desde, hasta, area } = req.query;
+    const { desde, hasta, area, cd } = req.query;
     if (!desde || !hasta) return res.status(400).json({ error: 'desde y hasta son requeridos (YYYY-MM-DD)' });
-    const datos = await calcularIndicadores(pool, { desde, hasta, area });
+    const cdsFiltro = await resolverCdsFiltro(req, cd);
+    const datos = await calcularIndicadores(pool, { desde, hasta, area, cds: cdsFiltro });
+    res.json(datos);
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.get('/api/indicadores/serie-cumplimiento', async (req, res) => {
+  try {
+    const { desde, hasta, cargo, jefesTurno } = req.query;
+    if (!desde || !hasta) return res.status(400).json({ error: 'desde y hasta son requeridos' });
+    const listaJefes = jefesTurno ? jefesTurno.split(',').filter(Boolean) : null;
+    const datos = await calcularSerieCumplimiento(pool, { desde, hasta, cargo: cargo || null, jefesTurno: listaJefes });
+    res.json(datos);
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.get('/api/indicadores/cargos-dashboard', (req, res) => {
+  res.json(CARGOS_DASHBOARD);
+});
+
+app.get('/api/indicadores/presentismo-historico', async (req, res) => {
+  try {
+    const { meses, jefesTurno } = req.query;
+    if (!meses) return res.status(400).json({ error: 'meses es requerido (ej: 2026-01,2026-02,2026-03)' });
+    const listaMeses = meses.split(',').filter(Boolean);
+    if (listaMeses.length !== 3) return res.status(400).json({ error: 'Debes indicar exactamente 3 meses (un trimestre)' });
+    const listaJefes = jefesTurno ? jefesTurno.split(',').filter(Boolean) : null;
+    const datos = await calcularPresentismoHistorico(pool, { meses: listaMeses, jefesTurno: listaJefes });
     res.json(datos);
   } catch (err) {
     console.error(err);
@@ -428,9 +557,10 @@ app.get('/api/indicadores/reporte-desvinculacion/export', async (req, res) => {
 
 app.get('/api/dashboard-asistencia', async (req, res) => {
   try {
-    const { desde, hasta, area } = req.query;
+    const { desde, hasta, area, cd } = req.query;
     if (!desde || !hasta) return res.status(400).json({ error: 'desde y hasta son requeridos (YYYY-MM-DD)' });
-    const datos = await calcularMatrizAsistencia(pool, { desde, hasta, area });
+    const cdsFiltro = await resolverCdsFiltro(req, cd);
+    const datos = await calcularMatrizAsistencia(pool, { desde, hasta, area, cds: cdsFiltro });
     res.json(datos);
   } catch (err) {
     console.error(err);
@@ -440,9 +570,10 @@ app.get('/api/dashboard-asistencia', async (req, res) => {
 
 app.get('/api/dashboard-asistencia/export', async (req, res) => {
   try {
-    const { desde, hasta, area } = req.query;
+    const { desde, hasta, area, cd } = req.query;
     if (!desde || !hasta) return res.status(400).json({ error: 'desde y hasta son requeridos (YYYY-MM-DD)' });
-    const buffer = await exportarMatrizAsistenciaXlsx(pool, { desde, hasta, area });
+    const cdsFiltro = await resolverCdsFiltro(req, cd);
+    const buffer = await exportarMatrizAsistenciaXlsx(pool, { desde, hasta, area, cds: cdsFiltro });
     res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
     res.setHeader('Content-Disposition', `attachment; filename="DashboardAsistencia_${desde}_a_${hasta}.xlsx"`);
     res.send(buffer);
@@ -476,9 +607,9 @@ app.get('/api/requerimiento-dotacion/vigente', async (req, res) => {
   try {
     const fecha = req.query.fecha || new Date().toISOString().slice(0, 10);
     const { rows } = await pool.query(
-      `SELECT DISTINCT ON (cargo, turno) cargo, turno, cantidad_requerida, vigente_desde, observacion
+      `SELECT DISTINCT ON (cargo, turno) cargo, turno, cantidad_requerida, vigente_desde, vigente_hasta, observacion
        FROM requerimiento_dotacion
-       WHERE vigente_desde <= $1
+       WHERE vigente_desde <= $1 AND (vigente_hasta IS NULL OR vigente_hasta >= $1)
        ORDER BY cargo, turno, vigente_desde DESC`,
       [fecha]
     );
@@ -491,14 +622,17 @@ app.get('/api/requerimiento-dotacion/vigente', async (req, res) => {
 
 app.post('/api/requerimiento-dotacion', async (req, res) => {
   try {
-    const { cargo, turno, cantidad_requerida, vigente_desde, observacion } = req.body;
+    const { cargo, turno, cantidad_requerida, vigente_desde, vigente_hasta, observacion } = req.body;
     if (!cargo || !cantidad_requerida || !vigente_desde) {
       return res.status(400).json({ error: 'cargo, cantidad_requerida y vigente_desde son requeridos' });
     }
+    if (vigente_hasta && vigente_hasta < vigente_desde) {
+      return res.status(400).json({ error: 'vigente_hasta no puede ser anterior a vigente_desde' });
+    }
     await pool.query(
-      `INSERT INTO requerimiento_dotacion (cargo, turno, cantidad_requerida, vigente_desde, observacion, creado_por)
-       VALUES ($1,$2,$3,$4,$5,$6)`,
-      [cargo, turno || null, cantidad_requerida, vigente_desde, observacion || null, req.usuario.nombre || req.usuario.usuario]
+      `INSERT INTO requerimiento_dotacion (cargo, turno, cantidad_requerida, vigente_desde, vigente_hasta, observacion, creado_por)
+       VALUES ($1,$2,$3,$4,$5,$6,$7)`,
+      [cargo, turno || null, cantidad_requerida, vigente_desde, vigente_hasta || null, observacion || null, req.usuario.nombre || req.usuario.usuario]
     );
     res.json({ ok: true });
   } catch (err) {
@@ -553,12 +687,100 @@ app.delete('/api/requerimiento-dotacion/:id', async (req, res) => {
   }
 });
 
+// --- Roles y módulos habilitados ---
+
+const MODULOS_DISPONIBLES = [
+  { key: 'dashboard', label: 'Dashboard' },
+  { key: 'resultados', label: 'Resultados' },
+  { key: 'detalle', label: 'Detalle Marcaciones' },
+  { key: 'reporte', label: 'Reporte diario' },
+  { key: 'nomina', label: 'Cierre de Nómina' },
+  { key: 'asignacion', label: 'Jefe de Turno' },
+  { key: 'perfiles', label: 'Perfiles / Áreas' },
+  { key: 'requerimiento', label: 'Requerimiento Dotación' },
+  { key: 'ausencias', label: 'Ausencias / Permisos' },
+  { key: 'actualizacion', label: 'Actualización diaria' },
+  { key: 'carga', label: 'Cargar planillas' },
+  { key: 'usuarios', label: 'Usuarios' },
+];
+
+app.get('/api/roles/modulos-disponibles', (req, res) => {
+  res.json(MODULOS_DISPONIBLES);
+});
+
+// Cualquier usuario logueado puede consultar sus propios módulos habilitados
+// (para que el frontend sepa qué pestañas mostrarle).
+app.get('/api/roles/mis-modulos', async (req, res) => {
+  try {
+    if (req.usuario.rol === 'admin') return res.json(MODULOS_DISPONIBLES.map(m => m.key));
+    const { rows } = await pool.query('SELECT modulos FROM roles WHERE nombre = $1', [req.usuario.rol]);
+    res.json(rows[0]?.modulos || []);
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.get('/api/roles', requireAdmin, async (req, res) => {
+  try {
+    const { rows } = await pool.query('SELECT nombre, modulos, es_sistema FROM roles ORDER BY es_sistema DESC, nombre');
+    res.json(rows);
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.post('/api/roles', requireAdmin, async (req, res) => {
+  try {
+    const nombre = (req.body.nombre || '').trim();
+    const modulos = Array.isArray(req.body.modulos) ? req.body.modulos : [];
+    if (!nombre) return res.status(400).json({ error: 'nombre es requerido' });
+    const { rows: existe } = await pool.query('SELECT nombre FROM roles WHERE nombre = $1', [nombre]);
+    if (existe.length > 0) return res.status(409).json({ error: 'Ya existe un rol con ese nombre' });
+    await pool.query('INSERT INTO roles (nombre, modulos, es_sistema) VALUES ($1,$2,false)', [nombre, modulos]);
+    res.json({ ok: true });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ ok: false, error: err.message });
+  }
+});
+
+app.put('/api/roles/:nombre', requireAdmin, async (req, res) => {
+  try {
+    const { rows: existe } = await pool.query('SELECT es_sistema FROM roles WHERE nombre = $1', [req.params.nombre]);
+    if (existe.length === 0) return res.status(404).json({ error: 'Rol no encontrado' });
+    if (existe[0].es_sistema) return res.status(400).json({ error: 'Este rol es del sistema y no se puede editar' });
+    const modulos = Array.isArray(req.body.modulos) ? req.body.modulos : [];
+    await pool.query('UPDATE roles SET modulos = $1 WHERE nombre = $2', [modulos, req.params.nombre]);
+    res.json({ ok: true });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ ok: false, error: err.message });
+  }
+});
+
+app.delete('/api/roles/:nombre', requireAdmin, async (req, res) => {
+  try {
+    const { rows: existe } = await pool.query('SELECT es_sistema FROM roles WHERE nombre = $1', [req.params.nombre]);
+    if (existe.length === 0) return res.status(404).json({ error: 'Rol no encontrado' });
+    if (existe[0].es_sistema) return res.status(400).json({ error: 'Este rol es del sistema y no se puede eliminar' });
+    const { rows: enUso } = await pool.query('SELECT id FROM usuarios WHERE rol = $1 LIMIT 1', [req.params.nombre]);
+    if (enUso.length > 0) return res.status(400).json({ error: 'Hay usuarios usando este rol; reasígnalos antes de eliminarlo' });
+    await pool.query('DELETE FROM roles WHERE nombre = $1', [req.params.nombre]);
+    res.json({ ok: true });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ ok: false, error: err.message });
+  }
+});
+
 // --- Gestión de usuarios (solo administradores) ---
 
 app.get('/api/usuarios', requireAdmin, async (req, res) => {
   try {
     const { rows } = await pool.query(
-      'SELECT id, usuario, nombre, rol, activo, creado_en FROM usuarios ORDER BY creado_en'
+      'SELECT id, usuario, nombre, rol, activo, cds_visibles, creado_en FROM usuarios ORDER BY creado_en'
     );
     res.json(rows);
   } catch (err) {
@@ -590,7 +812,7 @@ app.post('/api/usuarios', requireAdmin, async (req, res) => {
 
 app.put('/api/usuarios/:id', requireAdmin, async (req, res) => {
   try {
-    const { nombre, rol, activo, password } = req.body;
+    const { nombre, rol, activo, password, cds_visibles } = req.body;
 
     if (password) {
       if (password.length < 6) return res.status(400).json({ error: 'La contraseña debe tener al menos 6 caracteres' });
@@ -602,9 +824,10 @@ app.put('/api/usuarios/:id', requireAdmin, async (req, res) => {
       `UPDATE usuarios SET
          nombre = COALESCE($1, nombre),
          rol = COALESCE($2, rol),
-         activo = COALESCE($3, activo)
-       WHERE id = $4`,
-      [nombre, rol, activo, req.params.id]
+         activo = COALESCE($3, activo),
+         cds_visibles = COALESCE($4, cds_visibles)
+       WHERE id = $5`,
+      [nombre, rol, activo, cds_visibles, req.params.id]
     );
     res.json({ ok: true });
   } catch (err) {
@@ -675,20 +898,20 @@ app.post('/api/actualizar/cencosud', upload.single('cencosud'), async (req, res)
 // Buscar empleados por RUT o nombre (para el módulo de asignación de jefe de turno)
 app.get('/api/empleados', async (req, res) => {
   try {
-    const { q } = req.query;
+    const { q, cd } = req.query;
     if (!q || q.trim().length < 2) return res.json([]);
+    const cdsFiltro = await resolverCdsFiltro(req, cd);
     const like = `%${q.trim()}%`;
-    const { rows } = await pool.query(
-      `SELECT e.rut, e.nombre, e.apellido_paterno, e.apellido_materno, e.cargo, e.centro_costo,
-              e.empresa, e.activo, e.motivo_inactivo, e.tipo_contrato,
+    let sql = `SELECT e.rut, e.nombre, e.apellido_paterno, e.apellido_materno, e.cargo, e.centro_costo,
+              e.empresa, e.activo, e.motivo_inactivo, e.tipo_contrato, e.cd,
               a.jefe_turno
        FROM empleados e
        LEFT JOIN jefe_turno_asignacion a ON a.rut = e.rut
-       WHERE e.rut ILIKE $1 OR e.nombre ILIKE $1 OR e.apellido_paterno ILIKE $1
-       ORDER BY e.nombre
-       LIMIT 30`,
-      [like]
-    );
+       WHERE (e.rut ILIKE $1 OR e.nombre ILIKE $1 OR e.apellido_paterno ILIKE $1)`;
+    const params = [like];
+    if (cdsFiltro) { params.push(cdsFiltro); sql += ` AND e.cd = ANY($${params.length}::text[])`; }
+    sql += ' ORDER BY e.nombre LIMIT 30';
+    const { rows } = await pool.query(sql, params);
     const conContratoEfectivo = rows.map(r => ({
       ...r,
       tipo_contrato_efectivo: r.tipo_contrato || contratoDesdeRazonSocial(r.empresa) || 'OUT',
@@ -785,7 +1008,138 @@ app.get('/api/areas', async (req, res) => {
   }
 });
 
-app.post('/api/areas', async (req, res) => {
+// --- CDs (Centros de Distribución) ---
+
+// Lista de CDs distintos (para selects). Cualquier usuario logueado puede
+// consultarla, es solo referencia.
+app.get('/api/cds', async (req, res) => {
+  try {
+    const { rows } = await pool.query('SELECT DISTINCT cd FROM cd_sucursal ORDER BY cd');
+    res.json(rows.map(r => r.cd));
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Los CDs que el usuario actual tiene permitido ver. Arreglo vacío = ve
+// todos los CDs (consolidado) — así se configura para admin/Gerente/etc.
+app.get('/api/mis-cds', async (req, res) => {
+  try {
+    if (req.usuario.rol === 'admin') return res.json([]);
+    const { rows } = await pool.query('SELECT cds_visibles FROM usuarios WHERE id = $1', [req.usuario.id]);
+    res.json(rows[0]?.cds_visibles || []);
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.get('/api/cd-sucursal', moduloRequerido('perfiles'), async (req, res) => {
+  try {
+    const { rows } = await pool.query('SELECT sucursal, cd FROM cd_sucursal ORDER BY cd, sucursal');
+    res.json(rows);
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Sucursales que aparecen en Talana pero no tienen ninguna fila en
+// cd_sucursal (por eso esos trabajadores quedan sin CD). Útil para
+// diagnosticar rápido si falta agregar alguna al mapeo.
+app.get('/api/cd-sucursal/sin-mapear', moduloRequerido('perfiles'), async (req, res) => {
+  try {
+    const { rows } = await pool.query(`
+      SELECT DISTINCT TRIM(UPPER(mt.sucursal)) AS sucursal, COUNT(DISTINCT mt.rut) AS trabajadores
+      FROM marcaciones_talana mt
+      WHERE mt.sucursal IS NOT NULL
+        AND TRIM(UPPER(mt.sucursal)) NOT IN (SELECT TRIM(UPPER(sucursal)) FROM cd_sucursal)
+      GROUP BY TRIM(UPPER(mt.sucursal))
+      ORDER BY trabajadores DESC
+    `);
+    res.json(rows);
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.post('/api/cd-sucursal', moduloRequerido('perfiles'), async (req, res) => {
+  try {
+    const sucursal = (req.body.sucursal || '').trim().toUpperCase();
+    const cd = (req.body.cd || '').trim().toUpperCase();
+    if (!sucursal || !cd) return res.status(400).json({ error: 'sucursal y cd son requeridos' });
+    await pool.query(
+      `INSERT INTO cd_sucursal (sucursal, cd) VALUES ($1,$2)
+       ON CONFLICT (sucursal) DO UPDATE SET cd = EXCLUDED.cd`,
+      [sucursal, cd]
+    );
+    res.json({ ok: true });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ ok: false, error: err.message });
+  }
+});
+
+app.delete('/api/cd-sucursal/:sucursal', moduloRequerido('perfiles'), async (req, res) => {
+  try {
+    await pool.query('DELETE FROM cd_sucursal WHERE sucursal = $1', [req.params.sucursal]);
+    res.json({ ok: true });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ ok: false, error: err.message });
+  }
+});
+
+// Recalcula el CD de todos los empleados a partir de sus marcas de Talana ya
+// cargadas + el mapeo Sucursal→CD actual. Útil después de corregir el mapeo,
+// sin tener que volver a subir los archivos de Talana.
+app.post('/api/empleados/recalcular-cd', moduloRequerido('perfiles'), async (req, res) => {
+  try {
+    await actualizarCdDesdeMarcaciones(pool);
+    const { rows } = await pool.query('SELECT COUNT(*) AS n FROM empleados WHERE cd IS NOT NULL');
+    res.json({ ok: true, empleados_con_cd: Number(rows[0].n) });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ ok: false, error: err.message });
+  }
+});
+
+
+app.get('/api/cargos-requerimiento', async (req, res) => {
+  try {
+    const { rows } = await pool.query('SELECT nombre FROM cargos_requerimiento ORDER BY nombre');
+    res.json(rows.map(r => r.nombre));
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.post('/api/cargos-requerimiento', async (req, res) => {
+  try {
+    const nombre = (req.body.nombre || '').trim().toUpperCase();
+    if (!nombre) return res.status(400).json({ error: 'nombre es requerido' });
+    await pool.query('INSERT INTO cargos_requerimiento (nombre) VALUES ($1) ON CONFLICT (nombre) DO NOTHING', [nombre]);
+    res.json({ ok: true });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ ok: false, error: err.message });
+  }
+});
+
+app.delete('/api/cargos-requerimiento/:nombre', async (req, res) => {
+  try {
+    await pool.query('DELETE FROM cargos_requerimiento WHERE nombre = $1', [req.params.nombre]);
+    res.json({ ok: true });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ ok: false, error: err.message });
+  }
+});
+
+app.post('/api/areas', moduloRequerido('perfiles'), async (req, res) => {
   try {
     const nombre = (req.body.nombre || '').trim().toUpperCase();
     if (!nombre) return res.status(400).json({ error: 'nombre es requerido' });
@@ -797,7 +1151,7 @@ app.post('/api/areas', async (req, res) => {
   }
 });
 
-app.delete('/api/areas/:nombre', async (req, res) => {
+app.delete('/api/areas/:nombre', moduloRequerido('perfiles'), async (req, res) => {
   try {
     await pool.query('DELETE FROM areas_trabajo WHERE nombre = $1', [req.params.nombre]);
     res.json({ ok: true });
@@ -810,7 +1164,7 @@ app.delete('/api/areas/:nombre', async (req, res) => {
 // --- Perfil de trabajador (crear / editar) ---
 
 // Crear un trabajador nuevo (para casos que aún no están en el Excel maestro)
-app.post('/api/empleados', async (req, res) => {
+app.post('/api/empleados', moduloRequerido('perfiles'), async (req, res) => {
   try {
     const { rut, nombre, apellido_paterno, apellido_materno, cargo, centro_costo } = req.body;
     if (!rut || !nombre) return res.status(400).json({ error: 'rut y nombre son requeridos' });
@@ -831,7 +1185,7 @@ app.post('/api/empleados', async (req, res) => {
 });
 
 // Marca activos/inactivos en masa a partir de un archivo con los RUTs vigentes.
-app.post('/api/empleados/activar-masivo', upload.single('activos'), async (req, res) => {
+app.post('/api/empleados/activar-masivo', moduloRequerido('perfiles'), upload.single('activos'), async (req, res) => {
   try {
     if (!req.file) return res.status(400).json({ error: 'Falta el archivo con los RUTs vigentes' });
     const resultado = await activarEmpleadosDesdeArchivo(pool, req.file.path);
@@ -843,7 +1197,7 @@ app.post('/api/empleados/activar-masivo', upload.single('activos'), async (req, 
 });
 
 // Actualiza el área (centro de costo) en masa desde un archivo RUT + ÁREA.
-app.post('/api/empleados/areas-masivo', upload.single('areas'), async (req, res) => {
+app.post('/api/empleados/areas-masivo', moduloRequerido('perfiles'), upload.single('areas'), async (req, res) => {
   try {
     if (!req.file) return res.status(400).json({ error: 'Falta el archivo con RUT y Área' });
     const resultado = await actualizarAreasDesdeArchivo(pool, req.file.path);
@@ -854,8 +1208,20 @@ app.post('/api/empleados/areas-masivo', upload.single('areas'), async (req, res)
   }
 });
 
+// Actualiza el Jefe de Turno en masa desde un archivo RUT + JEFE TURNO.
+app.post('/api/empleados/jefe-turno-masivo', moduloRequerido('perfiles'), upload.single('jefeturno'), async (req, res) => {
+  try {
+    if (!req.file) return res.status(400).json({ error: 'Falta el archivo con RUT y Jefe Turno' });
+    const resultado = await actualizarJefeTurnoDesdeArchivo(pool, req.file.path);
+    res.json({ ok: true, ...resultado });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ ok: false, error: err.message });
+  }
+});
+
 // Editar el perfil de un trabajador existente (cargo, área/centro de costo, nombre)
-app.put('/api/empleados/:rut', async (req, res) => {
+app.put('/api/empleados/:rut', moduloRequerido('perfiles'), async (req, res) => {
   try {
     const { nombre, apellido_paterno, apellido_materno, cargo, centro_costo, activo, motivo_inactivo, tipo_contrato } = req.body;
     const { rows: existe } = await pool.query('SELECT rut FROM empleados WHERE rut = $1', [req.params.rut]);

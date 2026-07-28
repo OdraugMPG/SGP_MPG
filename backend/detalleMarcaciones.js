@@ -71,7 +71,7 @@ function calcularHorasTrabajadas(entrada, salida, colacionMin) {
 }
 
 async function generarDetalleMarcaciones(pool, filtros, limite = 1000) {
-  const { rut, desde, hasta } = filtros;
+  const { rut, desde, hasta, cds } = filtros; // cds: null (todos) o arreglo de CDs permitidos/solicitados
 
   // Se trae un día extra antes y después del rango para poder fusionar
   // correctamente los turnos Noche que cruzan medianoche en los bordes.
@@ -104,7 +104,10 @@ async function generarDetalleMarcaciones(pool, filtros, limite = 1000) {
   const { rows: cencosudRows } = await pool.query(sqlCencosud, paramsCencosud);
   const cencosudPorClave = new Map(cencosudRows.map(r => [`${r.rut}|${r.fecha}`, r]));
 
-  const { rows: empleados } = await pool.query('SELECT rut, nombre, apellido_paterno, cargo, empresa, tipo_contrato FROM empleados');
+  let sqlEmp = 'SELECT rut, nombre, apellido_paterno, cargo, empresa, tipo_contrato FROM empleados WHERE 1=1';
+  const paramsEmp = [];
+  if (cds) { paramsEmp.push(cds); sqlEmp += ` AND cd = ANY($${paramsEmp.length}::text[])`; }
+  const { rows: empleados } = await pool.query(sqlEmp, paramsEmp);
   const empleadoPorRut = new Map(empleados.map(e => [e.rut, e]));
 
   const { rows: asignaciones } = await pool.query('SELECT rut, jefe_turno FROM jefe_turno_asignacion');
@@ -144,6 +147,7 @@ async function generarDetalleMarcaciones(pool, filtros, limite = 1000) {
     const talana = talanaFusionado.get(key) || { entradas: [], salidas: [] };
     const cencosud = cencosudPorClave.get(key);
     const emp = empleadoPorRut.get(rutFila);
+    if (cds && !emp) continue; // hay filtro de CD activo y este rut no calzó (quedó fuera del filtro)
 
     const entradaTalana = talana.entradas[0] || null;
     const salidaTalana = talana.salidas[talana.salidas.length - 1] || null;

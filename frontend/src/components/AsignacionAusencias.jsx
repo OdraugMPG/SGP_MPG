@@ -155,7 +155,7 @@ function RegistroPorRango({ rut, onGuardado }) {
   );
 }
 
-export default function AsignacionAusencias() {
+export default function AsignacionAusencias({ cdGlobal }) {
   const [busqueda, setBusqueda] = useState('');
   const [resultados, setResultados] = useState([]);
   const [buscando, setBuscando] = useState(false);
@@ -177,7 +177,7 @@ export default function AsignacionAusencias() {
     const timer = setTimeout(async () => {
       setBuscando(true);
       try {
-        setResultados(await buscarEmpleados(busqueda.trim()));
+        setResultados(await buscarEmpleados(busqueda.trim(), cdGlobal || undefined));
       } catch (err) {
         setError(err.message);
       } finally {
