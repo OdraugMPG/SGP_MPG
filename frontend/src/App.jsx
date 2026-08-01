@@ -4,8 +4,11 @@ import ActualizacionDiaria from './components/ActualizacionDiaria';
 import TablaResultados from './components/TablaResultados';
 import ReporteDiario from './components/ReporteDiario';
 import CierreNomina from './components/CierreNomina';
+import ReporteHorasExtras from './components/ReporteHorasExtras';
+import AutorizacionHorasExtras from './components/AutorizacionHorasExtras';
 import AsignacionJefeTurno from './components/AsignacionJefeTurno';
 import PerfilTrabajador from './components/PerfilTrabajador';
+import FueroMaternal from './components/FueroMaternal';
 import AsignacionAusencias from './components/AsignacionAusencias';
 import DashboardAsistencia from './components/DashboardAsistencia';
 import DetalleMarcaciones from './components/DetalleMarcaciones';
@@ -21,8 +24,10 @@ const TODAS_LAS_PESTANAS = [
   { key: 'detalle', label: 'Detalle Marcaciones' },
   { key: 'reporte', label: 'Reporte diario' },
   { key: 'nomina', label: 'Cierre de Nómina' },
+  { key: 'horasExtras', label: 'Horas Extras' },
   { key: 'asignacion', label: 'Jefe de Turno' },
   { key: 'perfiles', label: 'Perfiles / Áreas' },
+  { key: 'fueroMaternal', label: 'Fuero Maternal' },
   { key: 'requerimiento', label: 'Requerimiento Dotación' },
   { key: 'ausencias', label: 'Ausencias / Permisos' },
   { key: 'actualizacion', label: 'Actualización diaria' },
@@ -166,6 +171,14 @@ export default function App() {
                 <CierreNomina cdGlobal={cdGlobal} />
               </div>
             )}
+            {modulosHabilitados.includes('horasExtras') && (
+              <div style={{ display: tab === 'horasExtras' ? 'block' : 'none' }}>
+                <AutorizacionHorasExtras cdGlobal={cdGlobal} />
+                <div style={{ marginTop: 20 }}>
+                  <ReporteHorasExtras cdGlobal={cdGlobal} />
+                </div>
+              </div>
+            )}
             {modulosHabilitados.includes('asignacion') && (
               <div style={{ display: tab === 'asignacion' ? 'block' : 'none' }}>
                 <AsignacionJefeTurno cdGlobal={cdGlobal} />
@@ -174,6 +187,11 @@ export default function App() {
             {modulosHabilitados.includes('perfiles') && (
               <div style={{ display: tab === 'perfiles' ? 'block' : 'none' }}>
                 <PerfilTrabajador cdGlobal={cdGlobal} />
+              </div>
+            )}
+            {modulosHabilitados.includes('fueroMaternal') && (
+              <div style={{ display: tab === 'fueroMaternal' ? 'block' : 'none' }}>
+                <FueroMaternal />
               </div>
             )}
             {modulosHabilitados.includes('requerimiento') && (

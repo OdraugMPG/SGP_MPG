@@ -27,7 +27,7 @@ const OPCIONES_JEFE_TURNO = [
 // Sin filtros muestra el consolidado de TODOS los cargos y jefes de turno;
 // con filtros, muestra el detalle específico. El filtro de Jefe de Turno
 // admite selección múltiple (checkboxes).
-export default function GraficoCumplimientoCargo({ desde: desdeProp, hasta: hastaProp, titulo }) {
+export default function GraficoCumplimientoCargo({ desde: desdeProp, hasta: hastaProp, titulo, cdGlobal }) {
   const fechasControladas = Boolean(desdeProp && hastaProp);
 
   const [desdePropio, setDesdePropio] = useState(primerDiaMesISO());
@@ -53,14 +53,14 @@ export default function GraficoCumplimientoCargo({ desde: desdeProp, hasta: hast
     setCargando(true);
     setError(null);
     try {
-      const datos = await obtenerSerieCumplimiento(desde, hasta, cargo || undefined, jefesTurno);
+      const datos = await obtenerSerieCumplimiento(desde, hasta, cargo || undefined, jefesTurno, cdGlobal || undefined);
       setSerie(datos.serie);
     } catch (err) {
       setError(err.message);
     } finally {
       setCargando(false);
     }
-  }, [cargo, jefesTurno, desde, hasta]);
+  }, [cargo, jefesTurno, desde, hasta, cdGlobal]);
 
   useEffect(() => { cargar(); }, [cargar]);
 

@@ -1,7 +1,7 @@
 const PDFDocument = require('pdfkit');
 const {
   fusionarTurnosNocturnos, diaDeSemana, semanaISO, resolverJefeTurno, sumarDias, determinarTipoTurno,
-  minutosAjusteColacion,
+  minutosAjusteColacion, construirRotacionBasePorClave,
 } = require('./importar');
 const { corregirMarcasDuplicadas, horarioProgramado, horaAMinutos, minutosAHora } = require('./reporteDiario');
 
@@ -59,10 +59,9 @@ async function calcularDatosReporteEmpleado(pool, rut, mes) {
 
   const { rows: rotacionRows } = await pool.query('SELECT sem, jefe_turno, dia, hora_entrada, hora_salida, rotacion_base FROM rotacion_turnos');
   const rotacionMap = new Map(rotacionRows.map(r => [`${r.sem}|${r.jefe_turno}|${r.dia}`, r]));
-  const rotacionBasePorClave = new Map();
-  for (const r of rotacionRows) {
-    if (r.rotacion_base) rotacionBasePorClave.set(`${r.sem}|${r.jefe_turno}`, r.rotacion_base);
-  }
+  const rotacionBasePorClave = construirRotacionBasePorClave(rotacionRows);
+  const { rows: horarioPlanoRows } = await pool.query('SELECT dia, hora_entrada, hora_salida FROM horario_plano');
+  const horarioPlanoMap = new Map(horarioPlanoRows.map(r => [r.dia, r]));
 
   const { rows: ausenciaRows } = await pool.query(
     'SELECT fecha, tipo FROM ausencias_permisos WHERE rut = $1 AND fecha BETWEEN $2 AND $3',
@@ -92,7 +91,7 @@ async function calcularDatosReporteEmpleado(pool, rut, mes) {
     }
 
     const dia = diaDeSemana(f);
-    const programado = horarioProgramado(rotacionMap, codigoJefeTurno, f);
+    const programado = horarioProgramado(rotacionMap, codigoJefeTurno, f, horarioPlanoMap);
     let atrasoMin = null;
     if (programado.entrada && entrada) {
       const diff = horaAMinutos(entrada) - horaAMinutos(programado.entrada);

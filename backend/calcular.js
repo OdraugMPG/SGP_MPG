@@ -1,15 +1,6 @@
-const { diaDeSemana, semanaISO, resolverJefeTurno, fusionarTurnosNocturnos, determinarTipoTurno, minutosAjusteColacion } = require('./importar');
+const { diaDeSemana, semanaISO, resolverJefeTurno, fusionarTurnosNocturnos, determinarTipoTurno, minutosAjusteColacion, construirRotacionBasePorClave } = require('./importar');
 
 const TOLERANCIA_MIN = 20;
-
-const TURNO_PLANO_HORARIO = {
-  Lun: { entrada: '08:00:00', salida: '17:30:00' },
-  Mar: { entrada: '08:00:00', salida: '17:30:00' },
-  Mié: { entrada: '08:00:00', salida: '17:30:00' },
-  Jue: { entrada: '08:00:00', salida: '16:00:00' },
-  Vie: { entrada: '08:00:00', salida: '16:00:00' },
-  // Sáb y Dom: sin jornada para turno Plano
-};
 
 function horaAMinutos(horaStr) {
   if (!horaStr) return null;
@@ -55,7 +46,24 @@ function resolverHora(candidatos, horaCencosud, preferido) {
   return { hora: elegida, origen: 'talana_ambiguo' };
 }
 
+// Mutex: evita que calcularResultados corra varias veces en paralelo. Si
+// algo (un doble clic, una petición repetida, un timeout con reintento)
+// dispara varias llamadas casi al mismo tiempo, las siguientes esperan a que
+// termine la que ya está corriendo, en vez de apilarse y recalcular una y
+// otra vez sin parar (que es exactamente lo que puede tardar minutos u horas
+// y saturar el servidor).
+let calculoEnCurso = null;
+
 async function calcularResultados(pool) {
+  if (calculoEnCurso) {
+    console.log('calcularResultados ya está corriendo — esperando a que termine en vez de duplicar el trabajo...');
+    return calculoEnCurso;
+  }
+  calculoEnCurso = calcularResultadosInterno(pool).finally(() => { calculoEnCurso = null; });
+  return calculoEnCurso;
+}
+
+async function calcularResultadosInterno(pool) {
   console.log('--- Iniciando calcularResultados ---');
   console.log('Leyendo marcaciones_talana...');
   const { rows: talanaRows } = await pool.query(
@@ -97,11 +105,11 @@ async function calcularResultados(pool) {
     'SELECT sem, jefe_turno, rotacion_base, dia, hora_entrada, hora_salida FROM rotacion_turnos'
   );
   const rotacionMap = new Map();
-  const rotacionBasePorClave = new Map();
-  for (const r of rotacionRows) {
-    rotacionMap.set(`${r.sem}|${r.jefe_turno}|${r.dia}`, r);
-    if (r.rotacion_base) rotacionBasePorClave.set(`${r.sem}|${r.jefe_turno}`, r.rotacion_base);
-  }
+  for (const r of rotacionRows) rotacionMap.set(`${r.sem}|${r.jefe_turno}|${r.dia}`, r);
+  const rotacionBasePorClave = construirRotacionBasePorClave(rotacionRows);
+
+  const { rows: horarioPlanoRows } = await pool.query('SELECT dia, hora_entrada, hora_salida FROM horario_plano');
+  const horarioPlanoMap = new Map(horarioPlanoRows.map(r => [r.dia, r]));
 
   const todasLasClaves = new Set([...talanaPorDia.keys(), ...cencosudPorDia.keys()]);
   console.log(`Calculando ${todasLasClaves.size} filas de resultado en memoria...`);
@@ -160,8 +168,8 @@ async function calcularResultados(pool) {
     let minutosAtraso = null;
 
     if (codigoAsignado === 'CG' || codigoAsignado === 'PLANO') {
-      const horarioPlano = TURNO_PLANO_HORARIO[dia];
-      if (horarioPlano) horaEsperada = horarioPlano.entrada;
+      const horarioPlano = horarioPlanoMap.get(dia);
+      if (horarioPlano) horaEsperada = horarioPlano.hora_entrada;
     } else if (codigoAsignado) {
       const codigoResuelto = resolverJefeTurno(codigoAsignado);
       const rot = rotacionMap.get(`${sem}|${codigoResuelto}|${dia}`);
@@ -170,7 +178,11 @@ async function calcularResultados(pool) {
 
     if (horaEsperada && horaEntradaReal) {
       const diff = horaAMinutos(horaEntradaReal) - horaAMinutos(horaEsperada);
-      minutosAtraso = diff > 0 ? diff : 0;
+      // Tolerancia de 15 minutos: de 1 a 15 minutos de diferencia no cuenta
+      // como atraso. Desde el minuto 16 en adelante, se descuenta solo el
+      // EXCESO sobre esos 15 minutos de tolerancia (ej: 25 min de diferencia
+      // -> 10 min de atraso para efectos de descuento).
+      minutosAtraso = diff >= 16 ? diff - 15 : 0;
     }
 
     filas.push([

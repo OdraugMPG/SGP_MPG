@@ -1,21 +1,23 @@
 const express = require('express');
 const cors = require('cors');
 const multer = require('multer');
+const XLSX = require('xlsx');
 const path = require('path');
 const fs = require('fs');
 require('dotenv').config();
 
-const { initDb } = require('./db');
+const { initDb, procesarTransicionesTermino } = require('./db');
 const { cargarTodo, cargarTalanaIncremental, cargarCencosudIncremental, activarEmpleadosDesdeArchivo, actualizarAreasDesdeArchivo, actualizarJefeTurnoDesdeArchivo, actualizarCdDesdeMarcaciones } = require('./importar');
 const { calcularResultados } = require('./calcular');
 const { generarReporteDiario, exportarReporteDiarioXlsx, obtenerLogMarcacion } = require('./reporteDiario');
 const { generarReporteEmpleadoPDF, generarReportePorJefeTurnoPDF } = require('./reporteEmpleadoPDF');
 const { generarDetalleMarcaciones, exportarDetalleMarcacionesXlsx } = require('./detalleMarcaciones');
 const { calcularCierreNomina, exportarCierreNominaXlsx } = require('./cierreNomina');
+const { calcularReporteHorasExtras, exportarReporteHorasExtrasXlsx, exportarReporteHorasExtrasPdf } = require('./reporteHorasExtras');
 const { calcularIndicadores, exportarReporteDesvinculacionXlsx, calcularSerieCumplimiento, calcularPresentismoHistorico, CARGOS_DASHBOARD } = require('./indicadores');
 const { calcularMatrizAsistencia, exportarMatrizAsistenciaXlsx } = require('./dashboardAsistencia');
 const { DIAS_FALLECIMIENTO, calcularFechaFinFallecimiento } = require('./permisoFallecimiento');
-const { semanaISO, diaDeSemana, resolverJefeTurno, sumarDias, determinarTipoTurno, contratoDesdeRazonSocial } = require('./importar');
+const { semanaISO, diaDeSemana, resolverJefeTurno, sumarDias, determinarTipoTurno, contratoDesdeRazonSocial, tipoTurnoDesdeHoraEntrada } = require('./importar');
 const { login, requireAuth, requireAdmin } = require('./auth');
 const bcrypt = require('bcryptjs');
 
@@ -94,6 +96,7 @@ function moduloRequerido(clave) {
 // de referencia de solo lectura que varios módulos necesitan consultar.)
 app.use('/api/reporte-diario', moduloRequerido('reporte'));
 app.use('/api/cierre-nomina', moduloRequerido('nomina'));
+app.use('/api/horas-extras', moduloRequerido('horasExtras'));
 app.use('/api/reporte-empleado', moduloRequerido('reporte'));
 app.use('/api/reporte-jefe-turno', moduloRequerido('reporte'));
 app.use('/api/ausencias', moduloRequerido('ausencias'));
@@ -145,6 +148,20 @@ app.post('/api/importar', upload.fields([
   }
 });
 
+// Fuerza el recálculo completo de "Resultados" usando los datos ACTUALES de
+// rotación/horario plano — útil si se hicieron varios cambios y se quiere
+// asegurar que todo (Resultados, Indicadores, Dashboard) quede sincronizado
+// de una vez, sin depender de que cada guardado individual lo haya disparado.
+app.post('/api/resultados/recalcular', moduloRequerido('asignacion'), async (req, res) => {
+  try {
+    await calcularResultados(pool);
+    res.json({ ok: true });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ ok: false, error: err.message });
+  }
+});
+
 app.get('/api/resultados', async (req, res) => {
   try {
     const { rut, desde, hasta, soloAtrasos, soloInconsistencias, jefeTurno, cd } = req.query;
@@ -171,6 +188,150 @@ app.get('/api/resultados', async (req, res) => {
   } catch (err) {
     console.error(err);
     res.status(500).json({ error: err.message });
+  }
+});
+
+app.get('/api/resultados/export', async (req, res) => {
+  try {
+    const { rut, desde, hasta, soloAtrasos, soloInconsistencias, jefeTurno, cd } = req.query;
+    const cdsFiltro = await resolverCdsFiltro(req, cd);
+
+    let sql = `SELECT r.* FROM resultado_diario r`;
+    if (jefeTurno) sql += ` JOIN jefe_turno_asignacion jt ON jt.rut = r.rut`;
+    if (cdsFiltro) sql += ` JOIN empleados emp_cd ON emp_cd.rut = r.rut`;
+    sql += ' WHERE 1=1';
+    const params = [];
+
+    if (rut) { params.push(rut); sql += ` AND r.rut = $${params.length}`; }
+    if (desde) { params.push(desde); sql += ` AND r.fecha >= $${params.length}`; }
+    if (hasta) { params.push(hasta); sql += ` AND r.fecha <= $${params.length}`; }
+    if (soloAtrasos === 'true') sql += ' AND r.minutos_atraso > 0';
+    if (soloInconsistencias === 'true') sql += ' AND r.inconsistencia IS NOT NULL';
+    if (jefeTurno) { params.push(jefeTurno); sql += ` AND jt.jefe_turno = $${params.length}`; }
+    if (cdsFiltro) { params.push(cdsFiltro); sql += ` AND emp_cd.cd = ANY($${params.length}::text[])`; }
+
+    sql += ' ORDER BY r.fecha, r.rut'; // sin límite, para exportar todo lo filtrado
+
+    const { rows } = await pool.query(sql, params);
+
+    const encabezado = ['RUT', 'Nombre', 'Fecha', 'Talana', 'Cencosud', 'Cruce', 'Entrada real', 'Entrada esperada', 'Atraso (min)', 'Salida real', 'Horas trabajadas'];
+    const datos = rows.map(r => [
+      r.rut, r.nombre, r.fecha,
+      r.marco_talana ? 'Sí' : 'No', r.marco_cencosud ? 'Sí' : 'No', r.inconsistencia || 'OK',
+      r.hora_entrada_real || '—', r.hora_entrada_esperada || '—', r.minutos_atraso ?? '—',
+      r.hora_salida_real || '—', r.horas_trabajadas ?? '—',
+    ]);
+
+    const ws = XLSX.utils.aoa_to_sheet([
+      [`Resultados de Asistencia — ${desde || 'Inicio'} a ${hasta || 'Hoy'}`],
+      [`${rows.length} registro(s)`],
+      [],
+      encabezado,
+      ...datos,
+    ]);
+    const nCols = encabezado.length;
+    ws['!autofilter'] = { ref: `A4:${XLSX.utils.encode_col(nCols - 1)}${datos.length + 4}` };
+    ws['!views'] = [{ state: 'frozen', ySplit: 4 }];
+    ws['!merges'] = [
+      { s: { r: 0, c: 0 }, e: { r: 0, c: nCols - 1 } },
+      { s: { r: 1, c: 0 }, e: { r: 1, c: nCols - 1 } },
+    ];
+    ws['!cols'] = [
+      { wch: 13 }, { wch: 26 }, { wch: 12 }, { wch: 8 }, { wch: 9 }, { wch: 10 },
+      { wch: 12 }, { wch: 15 }, { wch: 12 }, { wch: 12 }, { wch: 15 },
+    ];
+
+    const wb = XLSX.utils.book_new();
+    XLSX.utils.book_append_sheet(wb, ws, 'Resultados');
+    const buffer = XLSX.write(wb, { type: 'buffer', bookType: 'xlsx' });
+
+    res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
+    res.setHeader('Content-Disposition', `attachment; filename="ResultadosAsistencia_${desde || 'inicio'}_a_${hasta || 'hoy'}.xlsx"`);
+    res.send(buffer);
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// --- Fuero Maternal (Art. 201 Código del Trabajo) ---
+// Dato sensible: acceso restringido al módulo "fueroMaternal".
+
+async function fueroVigente(pool, rut, fecha) {
+  const { rows } = await pool.query(
+    `SELECT id, fecha_inicio_fuero, fecha_termino_fuero FROM fuero_maternal
+     WHERE rut = $1 AND fecha_inicio_fuero <= $2 AND (fecha_termino_fuero IS NULL OR fecha_termino_fuero >= $2)
+     ORDER BY fecha_inicio_fuero DESC LIMIT 1`,
+    [rut, fecha]
+  );
+  return rows[0] || null;
+}
+
+app.get('/api/fuero-maternal', moduloRequerido('fueroMaternal'), async (req, res) => {
+  try {
+    const hoy = new Date().toISOString().slice(0, 10);
+    const { rows } = await pool.query(
+      `SELECT f.*, e.nombre, e.apellido_paterno, e.cargo, e.cd,
+              (f.fecha_inicio_fuero <= $1 AND (f.fecha_termino_fuero IS NULL OR f.fecha_termino_fuero >= $1)) AS vigente
+       FROM fuero_maternal f
+       LEFT JOIN empleados e ON e.rut = f.rut
+       ORDER BY vigente DESC, f.fecha_inicio_fuero DESC`,
+      [hoy]
+    );
+    res.json(rows);
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.post('/api/fuero-maternal', moduloRequerido('fueroMaternal'), async (req, res) => {
+  try {
+    const { rut, fecha_probable_parto, fecha_inicio_fuero, fecha_termino_fuero, fecha_parto_real, restriccion_turno, observaciones } = req.body;
+    if (!rut || !fecha_inicio_fuero) {
+      return res.status(400).json({ error: 'rut y fecha_inicio_fuero son requeridos' });
+    }
+    await pool.query(
+      `INSERT INTO fuero_maternal (rut, fecha_probable_parto, fecha_inicio_fuero, fecha_termino_fuero, fecha_parto_real, restriccion_turno, observaciones, registrado_por)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8)`,
+      [rut, fecha_probable_parto || null, fecha_inicio_fuero, fecha_termino_fuero || null, fecha_parto_real || null,
+       !!restriccion_turno, observaciones || null, req.usuario.nombre || req.usuario.usuario]
+    );
+    res.json({ ok: true });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ ok: false, error: err.message });
+  }
+});
+
+app.put('/api/fuero-maternal/:id', moduloRequerido('fueroMaternal'), async (req, res) => {
+  try {
+    const { fecha_probable_parto, fecha_inicio_fuero, fecha_termino_fuero, fecha_parto_real, restriccion_turno, observaciones } = req.body;
+    await pool.query(
+      `UPDATE fuero_maternal SET
+         fecha_probable_parto = COALESCE($1, fecha_probable_parto),
+         fecha_inicio_fuero = COALESCE($2, fecha_inicio_fuero),
+         fecha_termino_fuero = $3,
+         fecha_parto_real = COALESCE($4, fecha_parto_real),
+         restriccion_turno = COALESCE($5, restriccion_turno),
+         observaciones = COALESCE($6, observaciones)
+       WHERE id = $7`,
+      [fecha_probable_parto, fecha_inicio_fuero, fecha_termino_fuero, fecha_parto_real, restriccion_turno, observaciones, req.params.id]
+    );
+    res.json({ ok: true });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ ok: false, error: err.message });
+  }
+});
+
+app.delete('/api/fuero-maternal/:id', moduloRequerido('fueroMaternal'), async (req, res) => {
+  try {
+    await pool.query('DELETE FROM fuero_maternal WHERE id = $1', [req.params.id]);
+    res.json({ ok: true });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ ok: false, error: err.message });
   }
 });
 
@@ -496,6 +657,109 @@ app.get('/api/cierre-nomina/export', async (req, res) => {
   }
 });
 
+function parseDiasSemanaQuery(diasSemana) {
+  return diasSemana ? diasSemana.split(',').filter(Boolean) : null;
+}
+
+app.get('/api/horas-extras', async (req, res) => {
+  try {
+    const { desde, hasta, diasSemana, turnos, cd, soloAutorizadas } = req.query;
+    if (!desde || !hasta) return res.status(400).json({ error: 'desde y hasta son requeridos (YYYY-MM-DD)' });
+    const cdsFiltro = await resolverCdsFiltro(req, cd);
+    const filas = await calcularReporteHorasExtras(pool, {
+      desde, hasta, diasSemana: parseDiasSemanaQuery(diasSemana), turnos: parseDiasSemanaQuery(turnos),
+      cds: cdsFiltro, soloAutorizadas: soloAutorizadas === 'true',
+    });
+    res.json(filas);
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.get('/api/horas-extras/export', async (req, res) => {
+  try {
+    const { desde, hasta, diasSemana, turnos, cd, soloAutorizadas } = req.query;
+    if (!desde || !hasta) return res.status(400).json({ error: 'desde y hasta son requeridos (YYYY-MM-DD)' });
+    const cdsFiltro = await resolverCdsFiltro(req, cd);
+    const buffer = await exportarReporteHorasExtrasXlsx(pool, {
+      desde, hasta, diasSemana: parseDiasSemanaQuery(diasSemana), turnos: parseDiasSemanaQuery(turnos),
+      cds: cdsFiltro, soloAutorizadas: soloAutorizadas === 'true',
+    });
+    res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
+    res.setHeader('Content-Disposition', `attachment; filename="HorasExtras_${desde}_a_${hasta}.xlsx"`);
+    res.send(buffer);
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.get('/api/horas-extras/export-pdf', async (req, res) => {
+  try {
+    const { desde, hasta, diasSemana, turnos, cd, soloAutorizadas } = req.query;
+    if (!desde || !hasta) return res.status(400).json({ error: 'desde y hasta son requeridos (YYYY-MM-DD)' });
+    const cdsFiltro = await resolverCdsFiltro(req, cd);
+    const buffer = await exportarReporteHorasExtrasPdf(pool, {
+      desde, hasta, diasSemana: parseDiasSemanaQuery(diasSemana), turnos: parseDiasSemanaQuery(turnos),
+      cds: cdsFiltro, soloAutorizadas: soloAutorizadas === 'true',
+    });
+    res.setHeader('Content-Type', 'application/pdf');
+    res.setHeader('Content-Disposition', `attachment; filename="HorasExtras_${desde}_a_${hasta}.pdf"`);
+    res.send(buffer);
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Lista los días/trabajadores que llegaron antes de su horario esperado
+// (candidatos a autorización de hora extra anticipada), con su estado actual.
+app.get('/api/horas-extras/candidatos-autorizacion', async (req, res) => {
+  try {
+    const { desde, hasta, cd } = req.query;
+    if (!desde || !hasta) return res.status(400).json({ error: 'desde y hasta son requeridos (YYYY-MM-DD)' });
+    const cdsFiltro = await resolverCdsFiltro(req, cd);
+    const filas = await generarDetalleMarcaciones(pool, { desde, hasta, cds: cdsFiltro }, Infinity);
+    const candidatos = filas
+      .filter(f => f.minutos_anticipados > 0)
+      .map(f => ({
+        fecha: f.fecha, rut: f.rut, nombre: f.nombre, cargo: f.cargo, turno: f.turno,
+        entrada_real: f.entrada_mpg, hora_entrada_esperada: f.hora_entrada_esperada,
+        minutos_anticipados: f.minutos_anticipados, autorizado: f.anticipado_autorizado,
+      }))
+      .sort((a, b) => a.fecha.localeCompare(b.fecha) || (a.nombre || '').localeCompare(b.nombre || ''));
+    res.json(candidatos);
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Autoriza (o quita la autorización de) la hora extra anticipada de un
+// trabajador en una fecha específica.
+app.post('/api/horas-extras/autorizar', moduloRequerido('horasExtras'), async (req, res) => {
+  try {
+    const { rut, fecha, autorizado, observacion } = req.body;
+    if (!rut || !fecha || typeof autorizado !== 'boolean') {
+      return res.status(400).json({ error: 'rut, fecha y autorizado (true/false) son requeridos' });
+    }
+    await pool.query(
+      `INSERT INTO horas_extras_autorizacion (rut, fecha, autorizado, autorizado_por, autorizado_en, observacion)
+       VALUES ($1,$2,$3,$4,now(),$5)
+       ON CONFLICT (rut, fecha) DO UPDATE SET
+         autorizado = EXCLUDED.autorizado, autorizado_por = EXCLUDED.autorizado_por,
+         autorizado_en = EXCLUDED.autorizado_en, observacion = EXCLUDED.observacion`,
+      [rut, fecha, autorizado, req.usuario.nombre || req.usuario.usuario, observacion || null]
+    );
+    res.json({ ok: true });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ ok: false, error: err.message });
+  }
+});
+
+
 app.get('/api/indicadores', async (req, res) => {
   try {
     const { desde, hasta, area, cd } = req.query;
@@ -511,10 +775,11 @@ app.get('/api/indicadores', async (req, res) => {
 
 app.get('/api/indicadores/serie-cumplimiento', async (req, res) => {
   try {
-    const { desde, hasta, cargo, jefesTurno } = req.query;
+    const { desde, hasta, cargo, jefesTurno, cd } = req.query;
     if (!desde || !hasta) return res.status(400).json({ error: 'desde y hasta son requeridos' });
     const listaJefes = jefesTurno ? jefesTurno.split(',').filter(Boolean) : null;
-    const datos = await calcularSerieCumplimiento(pool, { desde, hasta, cargo: cargo || null, jefesTurno: listaJefes });
+    const cdsFiltro = await resolverCdsFiltro(req, cd);
+    const datos = await calcularSerieCumplimiento(pool, { desde, hasta, cargo: cargo || null, jefesTurno: listaJefes, cds: cdsFiltro });
     res.json(datos);
   } catch (err) {
     console.error(err);
@@ -528,12 +793,17 @@ app.get('/api/indicadores/cargos-dashboard', (req, res) => {
 
 app.get('/api/indicadores/presentismo-historico', async (req, res) => {
   try {
-    const { meses, jefesTurno } = req.query;
+    const { meses, jefesTurno, cd } = req.query;
     if (!meses) return res.status(400).json({ error: 'meses es requerido (ej: 2026-01,2026-02,2026-03)' });
     const listaMeses = meses.split(',').filter(Boolean);
     if (listaMeses.length !== 3) return res.status(400).json({ error: 'Debes indicar exactamente 3 meses (un trimestre)' });
     const listaJefes = jefesTurno ? jefesTurno.split(',').filter(Boolean) : null;
-    const datos = await calcularPresentismoHistorico(pool, { meses: listaMeses, jefesTurno: listaJefes });
+    const cdsFiltro = await resolverCdsFiltro(req, cd);
+    // Esta vista trabaja con un solo CD a la vez (o "Todos" si no hay filtro
+    // activo ni seleccionado) — si el usuario está restringido a más de un
+    // CD, se usa el primero permitido como valor por defecto.
+    const cdUsado = cdsFiltro && cdsFiltro.length > 0 ? cdsFiltro[0] : null;
+    const datos = await calcularPresentismoHistorico(pool, { meses: listaMeses, jefesTurno: listaJefes, cd: cdUsado });
     res.json(datos);
   } catch (err) {
     console.error(err);
@@ -588,10 +858,11 @@ app.get('/api/dashboard-asistencia/export', async (req, res) => {
 // Historial completo, o filtrado por cargo.
 app.get('/api/requerimiento-dotacion', async (req, res) => {
   try {
-    const { cargo } = req.query;
+    const { cargo, cd } = req.query;
     let sql = 'SELECT * FROM requerimiento_dotacion WHERE 1=1';
     const params = [];
     if (cargo) { params.push(cargo); sql += ` AND cargo = $${params.length}`; }
+    if (cd) { params.push(cd); sql += ` AND cd = $${params.length}`; }
     sql += ' ORDER BY cargo, vigente_desde DESC';
     const { rows } = await pool.query(sql, params);
     res.json(rows);
@@ -601,17 +872,19 @@ app.get('/api/requerimiento-dotacion', async (req, res) => {
   }
 });
 
-// El requerimiento vigente de cada cargo+turno a una fecha dada (el último
-// cambio cuya "vigente_desde" sea igual o anterior a esa fecha).
+// El requerimiento vigente de cada cargo+turno+CD a una fecha dada (el último
+// cambio cuya "vigente_desde" sea igual o anterior a esa fecha, para ese CD).
 app.get('/api/requerimiento-dotacion/vigente', async (req, res) => {
   try {
     const fecha = req.query.fecha || new Date().toISOString().slice(0, 10);
+    const { cd } = req.query;
+    if (!cd) return res.status(400).json({ error: 'cd es requerido' });
     const { rows } = await pool.query(
-      `SELECT DISTINCT ON (cargo, turno) cargo, turno, cantidad_requerida, vigente_desde, vigente_hasta, observacion
+      `SELECT DISTINCT ON (cargo, turno) cargo, turno, cd, cantidad_requerida, vigente_desde, vigente_hasta, observacion
        FROM requerimiento_dotacion
-       WHERE vigente_desde <= $1 AND (vigente_hasta IS NULL OR vigente_hasta >= $1)
+       WHERE cd = $1 AND vigente_desde <= $2 AND (vigente_hasta IS NULL OR vigente_hasta >= $2)
        ORDER BY cargo, turno, vigente_desde DESC`,
-      [fecha]
+      [cd, fecha]
     );
     res.json(rows);
   } catch (err) {
@@ -622,18 +895,39 @@ app.get('/api/requerimiento-dotacion/vigente', async (req, res) => {
 
 app.post('/api/requerimiento-dotacion', async (req, res) => {
   try {
-    const { cargo, turno, cantidad_requerida, vigente_desde, vigente_hasta, observacion } = req.body;
-    if (!cargo || !cantidad_requerida || !vigente_desde) {
-      return res.status(400).json({ error: 'cargo, cantidad_requerida y vigente_desde son requeridos' });
+    const { cargo, turno, cd, cantidad_requerida, vigente_desde, vigente_hasta, observacion } = req.body;
+    if (!cargo || !cd || !cantidad_requerida || !vigente_desde) {
+      return res.status(400).json({ error: 'cargo, cd, cantidad_requerida y vigente_desde son requeridos' });
     }
     if (vigente_hasta && vigente_hasta < vigente_desde) {
       return res.status(400).json({ error: 'vigente_hasta no puede ser anterior a vigente_desde' });
     }
-    await pool.query(
-      `INSERT INTO requerimiento_dotacion (cargo, turno, cantidad_requerida, vigente_desde, vigente_hasta, observacion, creado_por)
-       VALUES ($1,$2,$3,$4,$5,$6,$7)`,
-      [cargo, turno || null, cantidad_requerida, vigente_desde, vigente_hasta || null, observacion || null, req.usuario.nombre || req.usuario.usuario]
-    );
+    const client = await pool.connect();
+    try {
+      await client.query('BEGIN');
+      // Cierra automáticamente cualquier registro anterior del mismo
+      // cargo+turno+CD que haya quedado "abierto" (sin vigente_hasta) y que
+      // empezó antes que este — así no queda un tramo indefinido que se
+      // solape con el nuevo registro en los cálculos históricos.
+      await client.query(
+        `UPDATE requerimiento_dotacion
+         SET vigente_hasta = ($1::date - INTERVAL '1 day')::text
+         WHERE cargo = $2 AND turno IS NOT DISTINCT FROM $3 AND cd = $4
+           AND vigente_hasta IS NULL AND vigente_desde < $1`,
+        [vigente_desde, cargo, turno || null, cd]
+      );
+      await client.query(
+        `INSERT INTO requerimiento_dotacion (cargo, turno, cd, cantidad_requerida, vigente_desde, vigente_hasta, observacion, creado_por)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8)`,
+        [cargo, turno || null, cd, cantidad_requerida, vigente_desde, vigente_hasta || null, observacion || null, req.usuario.nombre || req.usuario.usuario]
+      );
+      await client.query('COMMIT');
+    } catch (err) {
+      await client.query('ROLLBACK');
+      throw err;
+    } finally {
+      client.release();
+    }
     res.json({ ok: true });
   } catch (err) {
     console.error(err);
@@ -642,12 +936,12 @@ app.post('/api/requerimiento-dotacion', async (req, res) => {
 });
 
 // Guarda de una vez varias celdas de la matriz Cargo x Turno.
-// body: { vigente_desde, observacion, items: [{ cargo, turno, cantidad_requerida }, ...] }
+// body: { vigente_desde, cd, observacion, items: [{ cargo, turno, cantidad_requerida }, ...] }
 app.post('/api/requerimiento-dotacion/masivo', async (req, res) => {
   try {
-    const { vigente_desde, observacion, items } = req.body;
-    if (!vigente_desde || !Array.isArray(items) || items.length === 0) {
-      return res.status(400).json({ error: 'vigente_desde e items son requeridos' });
+    const { vigente_desde, cd, observacion, items } = req.body;
+    if (!vigente_desde || !cd || !Array.isArray(items) || items.length === 0) {
+      return res.status(400).json({ error: 'vigente_desde, cd e items son requeridos' });
     }
     const creadoPor = req.usuario.nombre || req.usuario.usuario;
 
@@ -656,10 +950,18 @@ app.post('/api/requerimiento-dotacion/masivo', async (req, res) => {
       await client.query('BEGIN');
       for (const item of items) {
         if (item.cantidad_requerida === '' || item.cantidad_requerida === null || item.cantidad_requerida === undefined) continue;
+        // Mismo cierre automático que en el registro individual.
         await client.query(
-          `INSERT INTO requerimiento_dotacion (cargo, turno, cantidad_requerida, vigente_desde, observacion, creado_por)
-           VALUES ($1,$2,$3,$4,$5,$6)`,
-          [item.cargo, item.turno || null, Number(item.cantidad_requerida), vigente_desde, observacion || null, creadoPor]
+          `UPDATE requerimiento_dotacion
+           SET vigente_hasta = ($1::date - INTERVAL '1 day')::text
+           WHERE cargo = $2 AND turno IS NOT DISTINCT FROM $3 AND cd = $4
+             AND vigente_hasta IS NULL AND vigente_desde < $1`,
+          [vigente_desde, item.cargo, item.turno || null, cd]
+        );
+        await client.query(
+          `INSERT INTO requerimiento_dotacion (cargo, turno, cd, cantidad_requerida, vigente_desde, observacion, creado_por)
+           VALUES ($1,$2,$3,$4,$5,$6,$7)`,
+          [item.cargo, item.turno || null, cd, Number(item.cantidad_requerida), vigente_desde, observacion || null, creadoPor]
         );
       }
       await client.query('COMMIT');
@@ -671,6 +973,32 @@ app.post('/api/requerimiento-dotacion/masivo', async (req, res) => {
     }
 
     res.json({ ok: true, guardados: items.filter(i => i.cantidad_requerida !== '' && i.cantidad_requerida !== null).length });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ ok: false, error: err.message });
+  }
+});
+
+// Edita un registro existente (típicamente para cerrarlo con vigente_hasta,
+// o corregir la cantidad/observación). No se permite cambiar cargo, turno,
+// CD ni vigente_desde, para no romper la identidad histórica del registro.
+app.put('/api/requerimiento-dotacion/:id', async (req, res) => {
+  try {
+    const { cantidad_requerida, vigente_hasta, observacion } = req.body;
+    const { rows: existe } = await pool.query('SELECT vigente_desde FROM requerimiento_dotacion WHERE id = $1', [req.params.id]);
+    if (existe.length === 0) return res.status(404).json({ error: 'Registro no encontrado' });
+    if (vigente_hasta && vigente_hasta < existe[0].vigente_desde) {
+      return res.status(400).json({ error: 'vigente_hasta no puede ser anterior a vigente_desde' });
+    }
+    await pool.query(
+      `UPDATE requerimiento_dotacion SET
+         cantidad_requerida = COALESCE($1, cantidad_requerida),
+         vigente_hasta = $2,
+         observacion = COALESCE($3, observacion)
+       WHERE id = $4`,
+      [cantidad_requerida || null, vigente_hasta || null, observacion, req.params.id]
+    );
+    res.json({ ok: true });
   } catch (err) {
     console.error(err);
     res.status(500).json({ ok: false, error: err.message });
@@ -695,8 +1023,10 @@ const MODULOS_DISPONIBLES = [
   { key: 'detalle', label: 'Detalle Marcaciones' },
   { key: 'reporte', label: 'Reporte diario' },
   { key: 'nomina', label: 'Cierre de Nómina' },
+  { key: 'horasExtras', label: 'Horas Extras' },
   { key: 'asignacion', label: 'Jefe de Turno' },
   { key: 'perfiles', label: 'Perfiles / Áreas' },
+  { key: 'fueroMaternal', label: 'Fuero Maternal' },
   { key: 'requerimiento', label: 'Requerimiento Dotación' },
   { key: 'ausencias', label: 'Ausencias / Permisos' },
   { key: 'actualizacion', label: 'Actualización diaria' },
@@ -876,6 +1206,7 @@ app.post('/api/actualizar/talana', upload.single('talana'), async (req, res) => 
     if (!req.file) return res.status(400).json({ ok: false, error: 'Falta el archivo talana' });
     const { fechas, filas } = await cargarTalanaIncremental(pool, req.file.path);
     await calcularResultados(pool);
+    await procesarTransicionesTermino(pool);
     res.json({ ok: true, fechas_actualizadas: fechas, filas_cargadas: filas });
   } catch (err) {
     console.error(err);
@@ -888,6 +1219,7 @@ app.post('/api/actualizar/cencosud', upload.single('cencosud'), async (req, res)
     if (!req.file) return res.status(400).json({ ok: false, error: 'Falta el archivo cencosud' });
     const { fechas, filas } = await cargarCencosudIncremental(pool, req.file.path);
     await calcularResultados(pool);
+    await procesarTransicionesTermino(pool);
     res.json({ ok: true, fechas_actualizadas: fechas, filas_cargadas: filas });
   } catch (err) {
     console.error(err);
@@ -903,7 +1235,7 @@ app.get('/api/empleados', async (req, res) => {
     const cdsFiltro = await resolverCdsFiltro(req, cd);
     const like = `%${q.trim()}%`;
     let sql = `SELECT e.rut, e.nombre, e.apellido_paterno, e.apellido_materno, e.cargo, e.centro_costo,
-              e.empresa, e.activo, e.motivo_inactivo, e.tipo_contrato, e.cd,
+              e.empresa, e.activo, e.motivo_inactivo, e.motivo_termino, e.fecha_termino, e.tipo_contrato, e.cd,
               a.jefe_turno
        FROM empleados e
        LEFT JOIN jefe_turno_asignacion a ON a.rut = e.rut
@@ -1035,6 +1367,193 @@ app.get('/api/mis-cds', async (req, res) => {
   }
 });
 
+// --- Rotación de turnos (horarios AM/PM/Noche por semana) ---
+// Permite corregir horarios puntuales sin tener que volver a subir el
+// archivo completo de Parámetros/Rotación.
+
+app.get('/api/rotacion-turnos', moduloRequerido('asignacion'), async (req, res) => {
+  try {
+    const { sem, jefe_turno } = req.query;
+    let sql = 'SELECT * FROM rotacion_turnos WHERE 1=1';
+    const params = [];
+    if (sem) { params.push(sem); sql += ` AND sem = $${params.length}`; }
+    if (jefe_turno) { params.push(jefe_turno); sql += ` AND jefe_turno = $${params.length}`; }
+    sql += " ORDER BY sem DESC, jefe_turno, CASE dia WHEN 'Lun' THEN 1 WHEN 'Mar' THEN 2 WHEN 'Mié' THEN 3 WHEN 'Jue' THEN 4 WHEN 'Vie' THEN 5 WHEN 'Sáb' THEN 6 WHEN 'Dom' THEN 7 ELSE 8 END";
+    const { rows } = await pool.query(sql, params);
+    res.json(rows);
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Lista de semanas y jefes de turno distintos, para armar los filtros del selector.
+app.get('/api/rotacion-turnos/opciones', moduloRequerido('asignacion'), async (req, res) => {
+  try {
+    const { rows: semanas } = await pool.query('SELECT DISTINCT sem FROM rotacion_turnos ORDER BY sem DESC');
+    const { rows: jefes } = await pool.query('SELECT DISTINCT jefe_turno FROM rotacion_turnos ORDER BY jefe_turno');
+    res.json({ semanas: semanas.map(r => r.sem), jefes_turno: jefes.map(r => r.jefe_turno) });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Matriz simple Día x Turno (AM/PM/Noche): muestra el horario típico actual
+// de cada combinación (tomando la semana más reciente como referencia), sin
+// necesidad de elegir semana ni Jefe de Turno específico.
+// OJO: esta ruta debe quedar ANTES de '/api/rotacion-turnos/:id' — si no,
+// Express interpreta "matriz" como si fuera el :id y falla.
+// Resuelve qué códigos de Jefe de Turno (T_RD, T_BV, T_WP, etc.) pertenecen a
+// un CD específico, mirando a qué CD están asignados los trabajadores que
+// tienen cada código (ya que rotacion_turnos no tiene columna de CD propia).
+async function codigosJefeTurnoDeCd(pool, cd) {
+  const { rows } = await pool.query(
+    `SELECT DISTINCT a.jefe_turno
+     FROM jefe_turno_asignacion a
+     JOIN empleados e ON e.rut = a.rut
+     WHERE e.cd = $1 AND a.jefe_turno IS NOT NULL`,
+    [cd]
+  );
+  return rows.map(r => r.jefe_turno);
+}
+
+app.get('/api/rotacion-turnos/matriz', moduloRequerido('asignacion'), async (req, res) => {
+  try {
+    const { cd } = req.query;
+    if (!cd) return res.status(400).json({ error: 'cd es requerido' });
+    const codigos = await codigosJefeTurnoDeCd(pool, cd);
+    if (codigos.length === 0) return res.json([]);
+    const { rows } = await pool.query(
+      `SELECT sem, jefe_turno, dia, hora_entrada, hora_salida, rotacion_base
+       FROM rotacion_turnos
+       WHERE jefe_turno = ANY($1::text[])
+       ORDER BY sem DESC`,
+      [codigos]
+    );
+    // Clasifica cada fila (turno real AM/PM/NOCHE, usando rotacion_base si
+    // existe o derivándolo de la hora de entrada si no) y se queda con la
+    // más reciente por cada combinación turno+día como valor representativo.
+    const vistos = new Set();
+    const resultado = [];
+    for (const r of rows) {
+      const turno = r.rotacion_base || tipoTurnoDesdeHoraEntrada(r.hora_entrada);
+      if (!turno) continue;
+      const clave = `${turno}|${r.dia}`;
+      if (vistos.has(clave)) continue;
+      vistos.add(clave);
+      resultado.push({ turno, dia: r.dia, hora_entrada: r.hora_entrada, hora_salida: r.hora_salida });
+    }
+    res.json(resultado);
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Actualiza el horario de un Turno (AM/PM/NOCHE) para un día de la semana en
+// TODAS las semanas, pero SOLO para los códigos de Jefe de Turno del CD
+// indicado — así no afecta a otros CDs que también tengan un grupo "AM" esa
+// semana con otro código. Clasifica cada fila con el mismo respaldo que el
+// resto del sistema (rotacion_base si existe, si no lo deriva de la hora de
+// entrada) — así encuentra y actualiza también las filas sin rotacion_base
+// guardado, que son la mayoría.
+app.put('/api/rotacion-turnos/matriz', moduloRequerido('asignacion'), async (req, res) => {
+  try {
+    const { turno, dia, hora_entrada, hora_salida, cd, semDesde, semHasta } = req.body;
+    if (!turno || !dia || !hora_entrada || !hora_salida || !cd) {
+      return res.status(400).json({ error: 'turno, dia, hora_entrada, hora_salida y cd son requeridos' });
+    }
+    const codigos = await codigosJefeTurnoDeCd(pool, cd);
+    if (codigos.length === 0) return res.status(400).json({ error: 'No hay Jefes de Turno asignados a trabajadores de este CD' });
+
+    // Rango de semanas opcional: si no se indica, se aplica a TODAS las
+    // semanas (comportamiento anterior). Si se indica, solo esas semanas
+    // (sirve tanto para "desde semana 27 hasta 52" como para corregir 1 o 2
+    // semanas puntuales, poniendo el mismo número en ambos campos).
+    let sqlFilas = `SELECT id, sem, hora_entrada, rotacion_base FROM rotacion_turnos WHERE jefe_turno = ANY($1::text[]) AND dia = $2`;
+    const paramsFilas = [codigos, dia];
+    if (semDesde) { paramsFilas.push(Number(semDesde)); sqlFilas += ` AND sem >= $${paramsFilas.length}`; }
+    if (semHasta) { paramsFilas.push(Number(semHasta)); sqlFilas += ` AND sem <= $${paramsFilas.length}`; }
+
+    const { rows } = await pool.query(sqlFilas, paramsFilas);
+    const idsAActualizar = rows
+      .filter(r => (r.rotacion_base || tipoTurnoDesdeHoraEntrada(r.hora_entrada)) === turno)
+      .map(r => r.id);
+
+    if (idsAActualizar.length === 0) {
+      return res.json({ ok: true, filas_actualizadas: 0 });
+    }
+
+    const { rowCount } = await pool.query(
+      `UPDATE rotacion_turnos SET hora_entrada = $1, hora_salida = $2 WHERE id = ANY($3::int[])`,
+      [hora_entrada, hora_salida, idsAActualizar]
+    );
+    // "Resultados" es una tabla pre-calculada — sin este recálculo, el
+    // cambio de horario quedaría guardado en rotacion_turnos pero invisible
+    // en Resultados hasta la próxima carga de archivos.
+    await calcularResultados(pool);
+    res.json({ ok: true, filas_actualizadas: rowCount });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ ok: false, error: err.message });
+  }
+});
+
+app.put('/api/rotacion-turnos/:id', moduloRequerido('asignacion'), async (req, res) => {
+  try {
+    const { hora_entrada, hora_salida, colacion, jornada, rotacion_base } = req.body;
+    await pool.query(
+      `UPDATE rotacion_turnos SET
+         hora_entrada = COALESCE($1, hora_entrada),
+         hora_salida = COALESCE($2, hora_salida),
+         colacion = COALESCE($3, colacion),
+         jornada = COALESCE($4, jornada),
+         rotacion_base = COALESCE($5, rotacion_base)
+       WHERE id = $6`,
+      [hora_entrada, hora_salida, colacion, jornada, rotacion_base, req.params.id]
+    );
+    await calcularResultados(pool);
+    res.json({ ok: true });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ ok: false, error: err.message });
+  }
+});
+
+// --- Horario Plano (Jefe de Operaciones / Supervisor Senior, código CG) ---
+// Reemplaza el horario que antes estaba fijo en el código, para poder
+// ajustarlo desde la pantalla.
+
+app.get('/api/horario-plano', moduloRequerido('asignacion'), async (req, res) => {
+  try {
+    const { rows } = await pool.query(
+      `SELECT * FROM horario_plano ORDER BY CASE dia WHEN 'Lun' THEN 1 WHEN 'Mar' THEN 2 WHEN 'Mié' THEN 3 WHEN 'Jue' THEN 4 WHEN 'Vie' THEN 5 WHEN 'Sáb' THEN 6 WHEN 'Dom' THEN 7 ELSE 8 END`
+    );
+    res.json(rows);
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.put('/api/horario-plano/:dia', moduloRequerido('asignacion'), async (req, res) => {
+  try {
+    const { hora_entrada, hora_salida } = req.body;
+    if (!hora_entrada || !hora_salida) return res.status(400).json({ error: 'hora_entrada y hora_salida son requeridos' });
+    await pool.query(
+      `INSERT INTO horario_plano (dia, hora_entrada, hora_salida) VALUES ($1,$2,$3)
+       ON CONFLICT (dia) DO UPDATE SET hora_entrada = EXCLUDED.hora_entrada, hora_salida = EXCLUDED.hora_salida`,
+      [req.params.dia, hora_entrada, hora_salida]
+    );
+    await calcularResultados(pool);
+    res.json({ ok: true });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ ok: false, error: err.message });
+  }
+});
+
 app.get('/api/cd-sucursal', moduloRequerido('perfiles'), async (req, res) => {
   try {
     const { rows } = await pool.query('SELECT sucursal, cd FROM cd_sucursal ORDER BY cd, sucursal');
@@ -1095,6 +1614,20 @@ app.delete('/api/cd-sucursal/:sucursal', moduloRequerido('perfiles'), async (req
 // Recalcula el CD de todos los empleados a partir de sus marcas de Talana ya
 // cargadas + el mapeo Sucursal→CD actual. Útil después de corregir el mapeo,
 // sin tener que volver a subir los archivos de Talana.
+// Fuerza la transición a inactivo de quienes ya tienen renuncia/desvinculación
+// registrada y su mes de término ya pasó — normalmente corre sola (al
+// arrancar el servidor y en cada carga diaria), este botón es solo por si se
+// necesita forzarla sin esperar.
+app.post('/api/empleados/procesar-transiciones-termino', moduloRequerido('perfiles'), async (req, res) => {
+  try {
+    const cantidad = await procesarTransicionesTermino(pool);
+    res.json({ ok: true, transicionados: cantidad });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ ok: false, error: err.message });
+  }
+});
+
 app.post('/api/empleados/recalcular-cd', moduloRequerido('perfiles'), async (req, res) => {
   try {
     await actualizarCdDesdeMarcaciones(pool);
@@ -1223,18 +1756,53 @@ app.post('/api/empleados/jefe-turno-masivo', moduloRequerido('perfiles'), upload
 // Editar el perfil de un trabajador existente (cargo, área/centro de costo, nombre)
 app.put('/api/empleados/:rut', moduloRequerido('perfiles'), async (req, res) => {
   try {
-    const { nombre, apellido_paterno, apellido_materno, cargo, centro_costo, activo, motivo_inactivo, tipo_contrato } = req.body;
-    const { rows: existe } = await pool.query('SELECT rut FROM empleados WHERE rut = $1', [req.params.rut]);
+    const { nombre, apellido_paterno, apellido_materno, cargo, centro_costo, estado, fecha_termino, motivo_inactivo, tipo_contrato } = req.body;
+    const { rows: existe } = await pool.query(
+      'SELECT rut, activo, motivo_termino, fecha_termino, motivo_inactivo FROM empleados WHERE rut = $1',
+      [req.params.rut]
+    );
     if (existe.length === 0) return res.status(404).json({ error: 'Trabajador no encontrado' });
+    const actual = existe[0];
 
-    if (activo === false && !motivo_inactivo) {
-      return res.status(400).json({ error: 'Debes indicar el motivo por el que queda inactivo' });
+    // "estado" es opcional: si no viene en este PUT (ej. solo se está editando
+    // el cargo), no se toca nada de activo/motivo_termino/fecha_termino.
+    let activoNuevo = actual.activo;
+    let motivoTerminoNuevo = actual.motivo_termino;
+    let fechaTerminoNuevo = actual.fecha_termino;
+    let motivoInactivoNuevo = motivo_inactivo !== undefined ? motivo_inactivo : actual.motivo_inactivo;
+
+    if (estado === 'activo') {
+      activoNuevo = true;
+      motivoTerminoNuevo = null;
+      fechaTerminoNuevo = null;
+      motivoInactivoNuevo = null;
+    } else if (estado === 'R' || estado === 'Des') {
+      if (!fecha_termino) {
+        return res.status(400).json({ error: 'Debes indicar la fecha de renuncia/desvinculación' });
+      }
+      // El fuero maternal (Art. 201 CT) protege contra la desvinculación por
+      // parte de la empresa sin autorización judicial previa — no aplica a
+      // la renuncia voluntaria de la propia trabajadora, así que solo se
+      // bloquea "Des". Se puede saltar el bloqueo únicamente si se confirma
+      // explícitamente contar con la autorización judicial (desafuero).
+      if (estado === 'Des') {
+        const fuero = await fueroVigente(pool, req.params.rut, fecha_termino);
+        if (fuero && !req.body.confirmarDesafuero) {
+          return res.status(400).json({
+            error: `Esta trabajadora tiene fuero maternal vigente (desde ${fuero.fecha_inicio_fuero}${fuero.fecha_termino_fuero ? ` hasta ${fuero.fecha_termino_fuero}` : ', sin fecha de término registrada'}). No se puede desvincular sin autorización judicial previa (Art. 201 Código del Trabajo). Si ya cuentas con esa autorización, marca la casilla de confirmación para continuar.`,
+            requiereConfirmacionDesafuero: true,
+          });
+        }
+      }
+      motivoTerminoNuevo = estado;
+      fechaTerminoNuevo = fecha_termino;
+      // Sigue activo mientras su mes de término no haya terminado todavía
+      // (para no perder el procesamiento de asistencia de ese mes); al mes
+      // siguiente, procesarTransicionesTermino() lo pasa a inactivo solo.
+      const mesActual = new Date().toISOString().slice(0, 7);
+      const mesTermino = fecha_termino.slice(0, 7);
+      activoNuevo = mesTermino >= mesActual;
     }
-
-    // El campo "activo" puede venir como true, false o no venir (undefined -> null,
-    // en cuyo caso no se toca). Cuando se reactiva a alguien (true), se limpia el
-    // motivo guardado; cuando se marca inactivo (false), se guarda/actualiza el motivo.
-    const activoParam = activo === true || activo === false ? activo : null;
 
     await pool.query(
       `UPDATE empleados SET
@@ -1243,17 +1811,15 @@ app.put('/api/empleados/:rut', moduloRequerido('perfiles'), async (req, res) => 
          apellido_materno = COALESCE($3, apellido_materno),
          cargo = COALESCE($4, cargo),
          centro_costo = COALESCE($5, centro_costo),
-         activo = COALESCE($6, activo),
-         motivo_inactivo = CASE
-           WHEN $6 = true THEN NULL
-           WHEN $6 = false THEN COALESCE($7, motivo_inactivo)
-           ELSE motivo_inactivo
-         END,
-         tipo_contrato = COALESCE($8, tipo_contrato)
-       WHERE rut = $9`,
-      [nombre, apellido_paterno, apellido_materno, cargo, centro_costo, activoParam, motivo_inactivo, tipo_contrato, req.params.rut]
+         activo = $6,
+         motivo_termino = $7,
+         fecha_termino = $8,
+         motivo_inactivo = $9,
+         tipo_contrato = COALESCE($10, tipo_contrato)
+       WHERE rut = $11`,
+      [nombre, apellido_paterno, apellido_materno, cargo, centro_costo, activoNuevo, motivoTerminoNuevo, fechaTerminoNuevo, motivoInactivoNuevo, tipo_contrato, req.params.rut]
     );
-    res.json({ ok: true });
+    res.json({ ok: true, activo: activoNuevo });
   } catch (err) {
     console.error(err);
     res.status(500).json({ ok: false, error: err.message });

@@ -1,16 +1,7 @@
 const XLSX = require('xlsx');
-const { contratoDesdeRazonSocial, diaDeSemana, semanaISO, resolverJefeTurno, sumarDias, fusionarTurnosNocturnos, determinarTipoTurno } = require('./importar');
+const { contratoDesdeRazonSocial, diaDeSemana, semanaISO, resolverJefeTurno, sumarDias, fusionarTurnosNocturnos, determinarTipoTurno, construirRotacionBasePorClave } = require('./importar');
 
 const TOLERANCIA_MIN = 20;
-
-// Horario Plano (para los códigos 'CG': Jefe de Operaciones / Supervisor Senior)
-const TURNO_PLANO_HORARIO = {
-  Lun: { entrada: '08:00:00', salida: '17:30:00' },
-  Mar: { entrada: '08:00:00', salida: '17:30:00' },
-  Mié: { entrada: '08:00:00', salida: '17:30:00' },
-  Jue: { entrada: '08:00:00', salida: '16:00:00' },
-  Vie: { entrada: '08:00:00', salida: '16:00:00' },
-};
 
 function horaAMinutos(horaStr) {
   if (!horaStr) return null;
@@ -114,14 +105,14 @@ function normalizarTurno(valorCencosud, codigoJefeTurno, fecha, rotacionBasePorC
 
 // Horario programado (según DB_Rotacion o Plano) para un código de jefe de turno y fecha dada.
 // Se usa solo como respaldo cuando no existe ninguna marca real en Talana ni Cencosud.
-function horarioProgramado(rotacionMap, codigoJefeTurno, fecha) {
+function horarioProgramado(rotacionMap, codigoJefeTurno, fecha, horarioPlanoMap) {
   if (!codigoJefeTurno) return { entrada: null, salida: null };
 
   const dia = diaDeSemana(fecha);
 
   if (codigoJefeTurno === 'CG' || codigoJefeTurno === 'PLANO') {
-    const h = TURNO_PLANO_HORARIO[dia];
-    return h ? { entrada: h.entrada, salida: h.salida } : { entrada: null, salida: null };
+    const h = horarioPlanoMap?.get(dia);
+    return h ? { entrada: h.hora_entrada, salida: h.hora_salida } : { entrada: null, salida: null };
   }
 
   const sem = semanaISO(fecha);
@@ -177,10 +168,10 @@ async function generarReporteDiario(pool, fecha, opciones = {}) {
   );
   const rotacionMap = new Map();
   for (const r of rotacionRows) rotacionMap.set(`${r.sem}|${r.jefe_turno}|${r.dia}`, r);
-  const rotacionBasePorClave = new Map();
-  for (const r of rotacionRows) {
-    if (r.rotacion_base) rotacionBasePorClave.set(`${r.sem}|${r.jefe_turno}`, r.rotacion_base);
-  }
+  const rotacionBasePorClave = construirRotacionBasePorClave(rotacionRows);
+
+  const { rows: horarioPlanoRows } = await pool.query('SELECT dia, hora_entrada, hora_salida FROM horario_plano');
+  const horarioPlanoMap = new Map(horarioPlanoRows.map(r => [r.dia, r]));
 
 
   const { rows: ausenciaRows } = await pool.query(
@@ -255,7 +246,7 @@ async function generarReporteDiario(pool, fecha, opciones = {}) {
     let entradaEstimada = false;
     let salidaEstimada = salidaSancion;
     if (!horaEntrada || !horaSalida) {
-      const programado = horarioProgramado(rotacionMap, codigoJefeTurno, fecha);
+      const programado = horarioProgramado(rotacionMap, codigoJefeTurno, fecha, horarioPlanoMap);
       if (!horaEntrada && programado.entrada) { horaEntrada = programado.entrada; entradaEstimada = true; }
       if (!horaSalida && programado.salida) { horaSalida = programado.salida; salidaEstimada = true; }
     }

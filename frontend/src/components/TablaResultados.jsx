@@ -1,5 +1,5 @@
 import { useEffect, useState, useCallback } from 'react';
-import { obtenerResultados } from '../api';
+import { obtenerResultados, urlDescargaResultados } from '../api';
 
 const OPCIONES_JEFE_TURNO = [
   { value: '', label: 'Todos' },
@@ -119,6 +119,22 @@ export default function TablaResultados({ refrescarSenal, cdGlobal }) {
         <button className="btn" type="button" onClick={cargar} disabled={cargando}>
           {cargando ? 'Cargando…' : 'Buscar'}
         </button>
+        {datos.length > 0 && (
+          <a
+            className="btn" style={{ textDecoration: 'none' }}
+            href={urlDescargaResultados({
+              rut: filtros.rut || undefined,
+              desde: filtros.desde || undefined,
+              hasta: filtros.hasta || undefined,
+              soloAtrasos: filtros.soloAtrasos ? 'true' : undefined,
+              soloInconsistencias: filtros.soloInconsistencias ? 'true' : undefined,
+              jefeTurno: filtros.jefeTurno || undefined,
+              cd: cdGlobal || undefined,
+            })}
+          >
+            Descargar Excel
+          </a>
+        )}
       </div>
 
       {error && <p className="status-msg error">{error}</p>}

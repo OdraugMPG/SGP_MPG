@@ -6,6 +6,10 @@ import {
   listarSucursalesSinMapear,
 } from '../api';
 
+function hoyISO() {
+  return new Date().toISOString().slice(0, 10);
+}
+
 function PanelMapeoCd() {
   const [mapeo, setMapeo] = useState([]);
   const [sucursal, setSucursal] = useState('');
@@ -302,6 +306,11 @@ function PanelActivacionMasiva() {
   );
 }
 
+function estadoActualDeEmpleado(empleado) {
+  if (empleado.motivo_termino === 'R' || empleado.motivo_termino === 'Des') return empleado.motivo_termino;
+  return empleado.activo === false ? 'inactivo_legado' : 'activo';
+}
+
 function FormularioEdicion({ empleado, areas, cargos, onGuardado, onCancelar }) {
   const [form, setForm] = useState({
     nombre: empleado.nombre || '',
@@ -309,25 +318,29 @@ function FormularioEdicion({ empleado, areas, cargos, onGuardado, onCancelar }) 
     apellido_materno: empleado.apellido_materno || '',
     cargo: empleado.cargo || '',
     centro_costo: empleado.centro_costo || '',
-    activo: empleado.activo !== false,
+    estado: estadoActualDeEmpleado(empleado),
+    fecha_termino: empleado.fecha_termino || hoyISO(),
     motivo_inactivo: empleado.motivo_inactivo || '',
     tipo_contrato: empleado.tipo_contrato_efectivo || empleado.tipo_contrato || 'OUT',
   });
   const [guardando, setGuardando] = useState(false);
   const [error, setError] = useState(null);
+  const [requiereDesafuero, setRequiereDesafuero] = useState(false);
+  const [confirmarDesafuero, setConfirmarDesafuero] = useState(false);
 
   async function guardar() {
-    if (!form.activo && !form.motivo_inactivo.trim()) {
-      setError('Debes indicar el motivo por el que queda inactivo.');
+    if ((form.estado === 'R' || form.estado === 'Des') && !form.fecha_termino) {
+      setError('Debes indicar la fecha de renuncia/desvinculación.');
       return;
     }
     setGuardando(true);
     setError(null);
     try {
-      await actualizarEmpleado(empleado.rut, form);
+      await actualizarEmpleado(empleado.rut, { ...form, confirmarDesafuero });
       onGuardado();
     } catch (err) {
       setError(err.message);
+      if (err.requiereConfirmacionDesafuero) setRequiereDesafuero(true);
     } finally {
       setGuardando(false);
     }
@@ -379,27 +392,52 @@ function FormularioEdicion({ empleado, areas, cargos, onGuardado, onCancelar }) 
           <div className="field">
             <label>Estado</label>
             <select
-              value={form.activo ? 'activo' : 'inactivo'}
-              onChange={e => setForm(f => ({ ...f, activo: e.target.value === 'activo', motivo_inactivo: e.target.value === 'activo' ? '' : f.motivo_inactivo }))}
+              value={form.estado}
+              onChange={e => setForm(f => ({ ...f, estado: e.target.value }))}
               style={{ width: '100%', background: 'var(--surface)', border: '1px solid var(--border)', borderRadius: 6, padding: '7px 9px', color: 'var(--text)' }}
             >
               <option value="activo">Activo</option>
-              <option value="inactivo">Inactivo</option>
+              <option value="R">Renuncia Voluntaria</option>
+              <option value="Des">Desvinculación (Art. 161 — Necesidades de la Empresa)</option>
+              {form.estado === 'inactivo_legado' && <option value="inactivo_legado">Inactivo (registro anterior, sin motivo estructurado)</option>}
             </select>
           </div>
-          {!form.activo && (
+          {(form.estado === 'R' || form.estado === 'Des') && (
             <div className="field">
-              <label>Motivo de inactividad</label>
+              <label>Fecha de {form.estado === 'R' ? 'renuncia' : 'desvinculación'}</label>
+              <input
+                type="date" value={form.fecha_termino}
+                onChange={e => setForm(f => ({ ...f, fecha_termino: e.target.value }))}
+                style={{ width: '100%', background: 'var(--surface)', border: '1px solid var(--border)', borderRadius: 6, padding: '7px 9px', color: 'var(--text)' }}
+              />
+            </div>
+          )}
+          {(form.estado === 'R' || form.estado === 'Des') && (
+            <div className="field">
+              <label>Observación (opcional)</label>
               <input
                 type="text" value={form.motivo_inactivo}
                 onChange={e => setForm(f => ({ ...f, motivo_inactivo: e.target.value }))}
-                placeholder="Ej: Renuncia voluntaria, término de contrato, desvinculación..."
+                placeholder="Detalle adicional si corresponde"
                 style={{ width: '100%', background: 'var(--surface)', border: '1px solid var(--border)', borderRadius: 6, padding: '7px 9px', color: 'var(--text)' }}
               />
             </div>
           )}
         </div>
+        {(form.estado === 'R' || form.estado === 'Des') && (
+          <p style={{ fontSize: '0.78rem', color: 'var(--text-muted)', marginTop: -6, marginBottom: 12 }}>
+            Queda <strong>activo</strong> hasta fin de este mes (para no perder su procesamiento de
+            asistencia), y pasa a inactivo automáticamente a partir del mes siguiente a la fecha
+            indicada.
+          </p>
+        )}
         {error && <p className="status-msg error">{error}</p>}
+        {requiereDesafuero && (
+          <label style={{ display: 'flex', alignItems: 'center', gap: 8, fontSize: '0.85rem', cursor: 'pointer', margin: '4px 0 12px', color: 'var(--danger)' }}>
+            <input type="checkbox" checked={confirmarDesafuero} onChange={e => setConfirmarDesafuero(e.target.checked)} />
+            Confirmo que cuento con autorización judicial de desafuero para proceder de todas formas
+          </label>
+        )}
         <div style={{ display: 'flex', gap: 10 }}>
           <button className="btn" type="button" disabled={guardando} onClick={guardar}>
             {guardando ? 'Guardando…' : 'Guardar cambios'}
@@ -666,9 +704,17 @@ export default function PerfilTrabajador({ cdGlobal }) {
                       <td>{emp.centro_costo || <span className="badge badge-muted">Sin área</span>}</td>
                       <td>{emp.tipo_contrato_efectivo || '—'}</td>
                       <td>
-                        {emp.activo === false
-                          ? <span className="badge badge-danger" title={emp.motivo_inactivo || ''}>Inactivo</span>
-                          : <span className="badge badge-ok">Activo</span>}
+                        {emp.activo === false ? (
+                          <span className="badge badge-danger" title={emp.motivo_inactivo || ''}>
+                            Inactivo {emp.motivo_termino === 'R' ? '(Renuncia)' : emp.motivo_termino === 'Des' ? '(Desvinculación)' : ''}
+                          </span>
+                        ) : (emp.motivo_termino === 'R' || emp.motivo_termino === 'Des') ? (
+                          <span className="badge badge-warn" title={`Pasa a inactivo el mes siguiente a ${emp.fecha_termino}`}>
+                            Activo — {emp.motivo_termino === 'R' ? 'Renuncia' : 'Desvinculación'} {emp.fecha_termino}
+                          </span>
+                        ) : (
+                          <span className="badge badge-ok">Activo</span>
+                        )}
                       </td>
                       <td>
                         <button

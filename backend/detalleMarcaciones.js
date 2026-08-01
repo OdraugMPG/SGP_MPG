@@ -1,6 +1,6 @@
 const {
   sumarDias, fusionarTurnosNocturnos, determinarTipoTurno, minutosAjusteColacion,
-  resolverJefeTurno, semanaISO, diaDeSemana, contratoDesdeRazonSocial,
+  resolverJefeTurno, semanaISO, diaDeSemana, contratoDesdeRazonSocial, construirRotacionBasePorClave,
 } = require('./importar');
 const XLSX = require('xlsx');
 
@@ -31,16 +31,7 @@ function formatoMinutos(mins) {
   return `${signo}${String(h).padStart(2, '0')}:${String(m).padStart(2, '0')}`;
 }
 
-// Horario del turno Plano (código 'CG'/'PLANO'), igual al usado en reporteDiario.js.
-const TURNO_PLANO_HORARIO = {
-  Lun: { entrada: '08:00:00', salida: '17:30:00' },
-  Mar: { entrada: '08:00:00', salida: '17:30:00' },
-  Mié: { entrada: '08:00:00', salida: '17:30:00' },
-  Jue: { entrada: '08:00:00', salida: '16:00:00' },
-  Vie: { entrada: '08:00:00', salida: '16:00:00' },
-};
-
-function normalizarTurnoLabel(valorCencosud, codigoJefeTurno) {
+function normalizarTurnoLabel(valorCencosud, codigoJefeTurno, fecha, rotacionBasePorClave) {
   if (valorCencosud) {
     const v = valorCencosud.toString().trim().toUpperCase();
     if (v === 'NOCHE') return 'Noche';
@@ -49,15 +40,45 @@ function normalizarTurnoLabel(valorCencosud, codigoJefeTurno) {
     if (v !== 'SIN TURNO') return valorCencosud;
   }
   if (codigoJefeTurno === 'CG' || codigoJefeTurno === 'PLANO') return 'Plano';
+  const tipo = determinarTipoTurno(codigoJefeTurno, fecha, rotacionBasePorClave);
+  if (tipo === 'NOCHE') return 'Noche';
+  if (tipo === 'AM' || tipo === 'PM') return tipo;
+  if (tipo === 'PLANO') return 'Plano';
   return '';
 }
 
-// Calcula horas extras SOLO si el exceso sobre la jornada esperada es de al
-// menos 60 minutos (1 hora). Si es menos, no se considera hora extra (0).
-function calcularHorasExtras(horasTrabajadas, jornadaEsperadaHoras) {
-  const excesoMin = Math.round((horasTrabajadas - jornadaEsperadaHoras) * 60);
-  if (excesoMin < 60) return 0;
-  return Math.round((excesoMin / 60) * 100) / 100;
+// Calcula las horas extras a partir de los minutos trabajados DESPUÉS de la
+// hora de salida esperada (no se compara la jornada completa, para no
+// depender de la duración esperada — solo importa cuánto se pasó del
+// horario de salida). Solo cuenta como hora extra si son 60 minutos o más.
+// Tabla de redondeo para el pago de horas extras:
+//  - menos de 30 min: no se paga (0)
+//  - entre 30 y 45 min: se pagan 45 min
+//  - más de 45 min (y menos de 60): se paga la hora completa (60 min)
+//  - desde 60 min en adelante: se paga exacto (la hora y los minutos reales)
+function calcularHorasExtrasDesdeMinutos(minutosExtras) {
+  if (!minutosExtras || minutosExtras < 30) return 0;
+  let minutosPagados;
+  if (minutosExtras <= 45) minutosPagados = 45;
+  else if (minutosExtras < 60) minutosPagados = 60;
+  else minutosPagados = minutosExtras;
+  return Math.round((minutosPagados / 60) * 100) / 100;
+}
+
+// Minutos trabajados después de la hora de salida esperada (0 si salió a la
+// hora o antes).
+function minutosExtraFinal(horaSalidaReal, horaSalidaEsperada) {
+  if (!horaSalidaReal || !horaSalidaEsperada) return 0;
+  const diff = horaAMinutos(horaSalidaReal) - horaAMinutos(horaSalidaEsperada);
+  return diff > 0 ? diff : 0;
+}
+
+// Minutos que la entrada real se adelantó respecto a la hora esperada (0 si
+// llegó a la hora o después).
+function minutosAnticipados(horaEntradaReal, horaEntradaEsperada) {
+  if (!horaEntradaReal || !horaEntradaEsperada) return 0;
+  const diff = horaAMinutos(horaEntradaEsperada) - horaAMinutos(horaEntradaReal);
+  return diff > 0 ? diff : 0;
 }
 
 // Calcula horas trabajadas (con colación ya aplicada) a partir de una entrada
@@ -114,23 +135,29 @@ async function generarDetalleMarcaciones(pool, filtros, limite = 1000) {
   const jefeTurnoPorRut = new Map(asignaciones.map(a => [a.rut, a.jefe_turno]));
 
   const { rows: rotacionRows } = await pool.query(
-    `SELECT sem, jefe_turno, rotacion_base, dia, jornada FROM rotacion_turnos`
+    `SELECT sem, jefe_turno, rotacion_base, dia, hora_entrada, hora_salida FROM rotacion_turnos`
   );
-  const rotacionBasePorClave = new Map();
-  const jornadaPorClave = new Map(); // sem|jefeTurno|dia -> minutos de jornada esperada
+  const rotacionBasePorClave = construirRotacionBasePorClave(rotacionRows);
+  const entradaEsperadaPorClave = new Map(); // sem|jefeTurno|dia -> hora_entrada esperada
+  const salidaEsperadaPorClave = new Map(); // sem|jefeTurno|dia -> hora_salida esperada
   for (const r of rotacionRows) {
-    if (r.rotacion_base) rotacionBasePorClave.set(`${r.sem}|${r.jefe_turno}`, r.rotacion_base);
-    if (r.jornada) jornadaPorClave.set(`${r.sem}|${r.jefe_turno}|${r.dia}`, horaAMinutos(r.jornada));
+    if (r.hora_entrada) entradaEsperadaPorClave.set(`${r.sem}|${r.jefe_turno}|${r.dia}`, r.hora_entrada);
+    if (r.hora_salida) salidaEsperadaPorClave.set(`${r.sem}|${r.jefe_turno}|${r.dia}`, r.hora_salida);
   }
 
+  const { rows: horarioPlanoRows } = await pool.query('SELECT dia, hora_entrada, hora_salida FROM horario_plano');
+  const horarioPlanoMap = new Map(horarioPlanoRows.map(r => [r.dia, r]));
+
+  // Autorizaciones de horas extras (rut+fecha) — solo si está autorizado se
+  // permite contar como hora extra el tiempo trabajado ANTES del horario de
+  // entrada esperado. Sin autorización, esos minutos anticipados no se pagan.
+  const { rows: autorizacionRows } = await pool.query(
+    'SELECT rut, fecha FROM horas_extras_autorizacion WHERE fecha BETWEEN $1 AND $2 AND autorizado = true',
+    [desdeExtendido, hastaExtendido]
+  );
+  const autorizadoPorClave = new Set(autorizacionRows.map(r => `${r.rut}|${r.fecha}`));
+
   // Jornada esperada (en minutos) para el turno Plano, según día de la semana.
-  function jornadaPlanoMin(dia) {
-    const h = TURNO_PLANO_HORARIO[dia];
-    if (!h) return null;
-    let mins = horaAMinutos(h.salida) - horaAMinutos(h.entrada);
-    mins -= 30; // colación de 30 min ya descontada de la jornada neta esperada
-    return mins;
-  }
 
   // Solo se listan las claves rut|fecha dentro del rango solicitado (el día
   // extra de antes/después solo se usó como contexto para fusionar turno noche).
@@ -172,24 +199,35 @@ async function generarDetalleMarcaciones(pool, filtros, limite = 1000) {
     const horasTrabajadasMPG = calcularHorasTrabajadas(entradaTalana, salidaTalana, colacionMin);
     const horasTrabajadasCencosud = calcularHorasTrabajadas(entradaCencosud, salidaCencosud, colacionMin);
 
-    // Jornada esperada (en horas) para calcular horas extras.
-    let jornadaEsperadaMin = null;
+    // Horario esperado (entrada y salida) para este trabajador ese día.
+    let horaEntradaEsperada = null;
+    let horaSalidaEsperada = null;
     if (codigoAsignado === 'CG' || codigoAsignado === 'PLANO') {
-      jornadaEsperadaMin = jornadaPlanoMin(dia);
+      horaEntradaEsperada = horarioPlanoMap.get(dia)?.hora_entrada || null;
+      horaSalidaEsperada = horarioPlanoMap.get(dia)?.hora_salida || null;
     } else if (codigoAsignado) {
       const codigoResuelto = resolverJefeTurno(codigoAsignado);
-      jornadaEsperadaMin = jornadaPorClave.get(`${sem}|${codigoResuelto}|${dia}`) ?? null;
+      horaEntradaEsperada = entradaEsperadaPorClave.get(`${sem}|${codigoResuelto}|${dia}`) ?? null;
+      horaSalidaEsperada = salidaEsperadaPorClave.get(`${sem}|${codigoResuelto}|${dia}`) ?? null;
     }
-    const jornadaEsperadaHoras = jornadaEsperadaMin !== null ? jornadaEsperadaMin / 60 : null;
 
-    const horasExtrasMPG = (horasTrabajadasMPG !== null && jornadaEsperadaHoras !== null)
-      ? calcularHorasExtras(horasTrabajadasMPG, jornadaEsperadaHoras)
+    // Horas extras = solo minutos trabajados DESPUÉS de la hora de salida
+    // esperada, más los minutos "anticipados" (entrada antes de lo
+    // esperado) SI están autorizados — y el anticipado solo aplica para
+    // turno PM o Noche (para AM no corresponde pedir entrada anticipada).
+    const anticipadoAutorizado = autorizadoPorClave.has(`${rutFila}|${fecha}`);
+    const permiteAnticipado = tipoTurno === 'PM' || tipoTurno === 'NOCHE';
+    const minAnticipadoMPG = (permiteAnticipado && anticipadoAutorizado) ? minutosAnticipados(entradaTalana, horaEntradaEsperada) : 0;
+    const minAnticipadoCencosud = (permiteAnticipado && anticipadoAutorizado) ? minutosAnticipados(entradaCencosud, horaEntradaEsperada) : 0;
+
+    const horasExtrasMPG = horasTrabajadasMPG !== null
+      ? calcularHorasExtrasDesdeMinutos(minutosExtraFinal(salidaTalana, horaSalidaEsperada) + minAnticipadoMPG)
       : null;
-    const horasExtrasCencosud = (horasTrabajadasCencosud !== null && jornadaEsperadaHoras !== null)
-      ? calcularHorasExtras(horasTrabajadasCencosud, jornadaEsperadaHoras)
+    const horasExtrasCencosud = horasTrabajadasCencosud !== null
+      ? calcularHorasExtrasDesdeMinutos(minutosExtraFinal(salidaCencosud, horaSalidaEsperada) + minAnticipadoCencosud)
       : null;
 
-    const turnoLabel = normalizarTurnoLabel(cencosud?.turno, codigoAsignado);
+    const turnoLabel = normalizarTurnoLabel(cencosud?.turno, codigoAsignado, fecha, rotacionBasePorClave);
     const tipoContrato = emp?.tipo_contrato || contratoDesdeRazonSocial(emp?.empresa) || 'OUT';
 
     let diferenciaHorasTrabajadasMin = null;
@@ -215,6 +253,9 @@ async function generarDetalleMarcaciones(pool, filtros, limite = 1000) {
       diferencia_entrada_min: formatoMinutos(diferenciaEntradaMin),
       diferencia_salida_min: formatoMinutos(diferenciaSalidaMin),
       diferencia_horas_trabajadas: formatoMinutos(diferenciaHorasTrabajadasMin),
+      hora_entrada_esperada: horaEntradaEsperada,
+      minutos_anticipados: permiteAnticipado ? minutosAnticipados(entradaTalana, horaEntradaEsperada) : 0,
+      anticipado_autorizado: anticipadoAutorizado,
     });
   }
 

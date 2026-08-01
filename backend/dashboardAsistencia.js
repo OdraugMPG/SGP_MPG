@@ -1,5 +1,5 @@
 const XLSX = require('xlsx');
-const { diaDeSemana, semanaISO, resolverJefeTurno, determinarTipoTurno } = require('./importar');
+const { diaDeSemana, semanaISO, resolverJefeTurno, determinarTipoTurno, construirRotacionBasePorClave } = require('./importar');
 
 function etiquetaTurno(tipoTurno) {
   if (tipoTurno === 'NOCHE') return 'Noche';
@@ -46,9 +46,9 @@ async function calcularMatrizAsistencia(pool, filtros) {
   const jefeTurnoPorRut = new Map(asignaciones.map(a => [a.rut, a.jefe_turno]));
 
   const { rows: rotacionRows } = await pool.query(
-    `SELECT DISTINCT sem, jefe_turno, rotacion_base FROM rotacion_turnos WHERE rotacion_base IS NOT NULL`
+    `SELECT sem, jefe_turno, rotacion_base, hora_entrada FROM rotacion_turnos`
   );
-  const rotacionBasePorClave = new Map(rotacionRows.map(r => [`${r.sem}|${r.jefe_turno}`, r.rotacion_base]));
+  const rotacionBasePorClave = construirRotacionBasePorClave(rotacionRows);
 
   const hoy = new Date().toISOString().slice(0, 10);
 

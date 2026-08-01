@@ -124,6 +124,15 @@ export async function obtenerResultados(filtros) {
   return res.json();
 }
 
+export function urlDescargaResultados(filtros) {
+  const params = new URLSearchParams();
+  Object.entries(filtros).forEach(([k, v]) => {
+    if (v) params.append(k, v);
+  });
+  params.append('token', obtenerToken() || '');
+  return `${API_URL}/api/resultados/export?${params.toString()}`;
+}
+
 export async function obtenerReporteDiario(fecha, excluirAreas = [], cd) {
   const params = new URLSearchParams({ fecha });
   if (excluirAreas.length > 0) params.append('excluirAreas', excluirAreas.join(','));
@@ -190,25 +199,76 @@ export function urlDescargaCierreNomina(desde, hasta, cd) {
   return `${API_URL}/api/cierre-nomina/export?${params.toString()}`;
 }
 
+function armarParamsHorasExtras(desde, hasta, diasSemana, turnos, cd, soloAutorizadas) {
+  const params = new URLSearchParams({ desde, hasta });
+  if (diasSemana && diasSemana.length > 0) params.append('diasSemana', diasSemana.join(','));
+  if (turnos && turnos.length > 0) params.append('turnos', turnos.join(','));
+  if (cd) params.append('cd', cd);
+  if (soloAutorizadas) params.append('soloAutorizadas', 'true');
+  return params;
+}
+
+export async function obtenerReporteHorasExtras(desde, hasta, diasSemana, turnos, cd, soloAutorizadas) {
+  const params = armarParamsHorasExtras(desde, hasta, diasSemana, turnos, cd, soloAutorizadas);
+  const res = await authFetch(`${API_URL}/api/horas-extras?${params.toString()}`);
+  const data = await res.json();
+  if (!res.ok) throw new Error(data.error || 'Error al calcular el reporte de horas extras');
+  return data;
+}
+
+export function urlDescargaHorasExtrasExcel(desde, hasta, diasSemana, turnos, cd, soloAutorizadas) {
+  const params = armarParamsHorasExtras(desde, hasta, diasSemana, turnos, cd, soloAutorizadas);
+  params.append('token', obtenerToken() || '');
+  return `${API_URL}/api/horas-extras/export?${params.toString()}`;
+}
+
+export function urlDescargaHorasExtrasPdf(desde, hasta, diasSemana, turnos, cd, soloAutorizadas) {
+  const params = armarParamsHorasExtras(desde, hasta, diasSemana, turnos, cd, soloAutorizadas);
+  params.append('token', obtenerToken() || '');
+  return `${API_URL}/api/horas-extras/export-pdf?${params.toString()}`;
+}
+
+export async function listarCandidatosAutorizacion(desde, hasta, cd) {
+  const params = new URLSearchParams({ desde, hasta });
+  if (cd) params.append('cd', cd);
+  const res = await authFetch(`${API_URL}/api/horas-extras/candidatos-autorizacion?${params.toString()}`);
+  const data = await res.json();
+  if (!res.ok) throw new Error(data.error || 'Error al listar los candidatos a autorización');
+  return data;
+}
+
+export async function autorizarHoraExtra(rut, fecha, autorizado, observacion) {
+  const res = await authFetch(`${API_URL}/api/horas-extras/autorizar`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ rut, fecha, autorizado, observacion }),
+  });
+  const data = await res.json();
+  if (!res.ok || !data.ok) throw new Error(data.error || 'Error al guardar la autorización');
+  return data;
+}
+
 export async function listarCargosDashboard() {
   const res = await authFetch(`${API_URL}/api/indicadores/cargos-dashboard`);
   if (!res.ok) throw new Error('Error al listar los cargos del dashboard');
   return res.json();
 }
 
-export async function obtenerPresentismoHistorico(meses, jefesTurno) {
+export async function obtenerPresentismoHistorico(meses, jefesTurno, cd) {
   const params = new URLSearchParams({ meses: meses.join(',') });
   if (jefesTurno && jefesTurno.length > 0) params.append('jefesTurno', jefesTurno.join(','));
+  if (cd) params.append('cd', cd);
   const res = await authFetch(`${API_URL}/api/indicadores/presentismo-historico?${params.toString()}`);
   const data = await res.json();
   if (!res.ok) throw new Error(data.error || 'Error al cargar el presentismo histórico');
   return data;
 }
 
-export async function obtenerSerieCumplimiento(desde, hasta, cargo, jefesTurno) {
+export async function obtenerSerieCumplimiento(desde, hasta, cargo, jefesTurno, cd) {
   const params = new URLSearchParams({ desde, hasta });
   if (cargo) params.append('cargo', cargo);
   if (jefesTurno && jefesTurno.length > 0) params.append('jefesTurno', jefesTurno.join(','));
+  if (cd) params.append('cd', cd);
   const res = await authFetch(`${API_URL}/api/indicadores/serie-cumplimiento?${params.toString()}`);
   const data = await res.json();
   if (!res.ok) throw new Error(data.error || 'Error al cargar la serie de cumplimiento');
@@ -387,6 +447,80 @@ export async function obtenerMisCds() {
   return res.json();
 }
 
+// --- Rotación de turnos y horario Plano (configurables sin usar código) ---
+
+export async function listarOpcionesRotacion() {
+  const res = await authFetch(`${API_URL}/api/rotacion-turnos/opciones`);
+  const data = await res.json();
+  if (!res.ok) throw new Error(data.error || 'Error al listar las opciones de rotación');
+  return data;
+}
+
+export async function listarRotacionTurnos(sem, jefeTurno) {
+  const params = new URLSearchParams();
+  if (sem) params.append('sem', sem);
+  if (jefeTurno) params.append('jefe_turno', jefeTurno);
+  const res = await authFetch(`${API_URL}/api/rotacion-turnos?${params.toString()}`);
+  const data = await res.json();
+  if (!res.ok) throw new Error(data.error || 'Error al listar la rotación de turnos');
+  return data;
+}
+
+export async function editarRotacionTurno(id, datos) {
+  const res = await authFetch(`${API_URL}/api/rotacion-turnos/${id}`, {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(datos),
+  });
+  const data = await res.json();
+  if (!res.ok || !data.ok) throw new Error(data.error || 'Error al editar la rotación');
+  return data;
+}
+
+export async function listarMatrizRotacion(cd) {
+  const params = new URLSearchParams({ cd });
+  const res = await authFetch(`${API_URL}/api/rotacion-turnos/matriz?${params.toString()}`);
+  const data = await res.json();
+  if (!res.ok) throw new Error(data.error || 'Error al listar la matriz de horarios');
+  return data;
+}
+
+export async function guardarMatrizRotacion(turno, dia, hora_entrada, hora_salida, cd, semDesde, semHasta) {
+  const res = await authFetch(`${API_URL}/api/rotacion-turnos/matriz`, {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ turno, dia, hora_entrada, hora_salida, cd, semDesde: semDesde || undefined, semHasta: semHasta || undefined }),
+  });
+  const data = await res.json();
+  if (!res.ok || !data.ok) throw new Error(data.error || 'Error al guardar el horario');
+  return data;
+}
+
+export async function recalcularResultados() {
+  const res = await authFetch(`${API_URL}/api/resultados/recalcular`, { method: 'POST' });
+  const data = await res.json();
+  if (!res.ok || !data.ok) throw new Error(data.error || 'Error al recalcular Resultados');
+  return data;
+}
+
+export async function listarHorarioPlano() {
+  const res = await authFetch(`${API_URL}/api/horario-plano`);
+  const data = await res.json();
+  if (!res.ok) throw new Error(data.error || 'Error al listar el horario Plano');
+  return data;
+}
+
+export async function editarHorarioPlano(dia, hora_entrada, hora_salida) {
+  const res = await authFetch(`${API_URL}/api/horario-plano/${encodeURIComponent(dia)}`, {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ hora_entrada, hora_salida }),
+  });
+  const data = await res.json();
+  if (!res.ok || !data.ok) throw new Error(data.error || 'Error al editar el horario Plano');
+  return data;
+}
+
 export async function listarMapeoCdSucursal() {
   const res = await authFetch(`${API_URL}/api/cd-sucursal`);
   if (!res.ok) throw new Error('Error al listar el mapeo de sucursales');
@@ -475,9 +609,12 @@ export async function eliminarArea(nombre) {
 
 // --- Requerimiento de dotación por cargo ---
 
-export async function listarRequerimientoDotacion(cargo) {
-  const params = cargo ? `?cargo=${encodeURIComponent(cargo)}` : '';
-  const res = await authFetch(`${API_URL}/api/requerimiento-dotacion${params}`);
+export async function listarRequerimientoDotacion(cargo, cd) {
+  const params = new URLSearchParams();
+  if (cargo) params.append('cargo', cargo);
+  if (cd) params.append('cd', cd);
+  const qs = params.toString();
+  const res = await authFetch(`${API_URL}/api/requerimiento-dotacion${qs ? `?${qs}` : ''}`);
   const data = await res.json();
   if (!res.ok) throw new Error(data.error || 'Error al listar el requerimiento de dotación');
   return data;
@@ -494,6 +631,17 @@ export async function crearRequerimientoDotacion(datos) {
   return data;
 }
 
+export async function editarRequerimientoDotacion(id, datos) {
+  const res = await authFetch(`${API_URL}/api/requerimiento-dotacion/${id}`, {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(datos),
+  });
+  const data = await res.json();
+  if (!res.ok || !data.ok) throw new Error(data.error || 'Error al editar el requerimiento');
+  return data;
+}
+
 export async function eliminarRequerimientoDotacion(id) {
   const res = await authFetch(`${API_URL}/api/requerimiento-dotacion/${id}`, { method: 'DELETE' });
   const data = await res.json();
@@ -501,9 +649,11 @@ export async function eliminarRequerimientoDotacion(id) {
   return data;
 }
 
-export async function listarRequerimientoDotacionVigente(fecha) {
-  const params = fecha ? `?fecha=${fecha}` : '';
-  const res = await authFetch(`${API_URL}/api/requerimiento-dotacion/vigente${params}`);
+export async function listarRequerimientoDotacionVigente(fecha, cd) {
+  const params = new URLSearchParams();
+  if (fecha) params.append('fecha', fecha);
+  if (cd) params.append('cd', cd);
+  const res = await authFetch(`${API_URL}/api/requerimiento-dotacion/vigente?${params.toString()}`);
   const data = await res.json();
   if (!res.ok) throw new Error(data.error || 'Error al consultar el requerimiento vigente');
   return data;
@@ -702,6 +852,42 @@ export async function crearEmpleado(datos) {
   return data;
 }
 
+export async function listarFueroMaternal() {
+  const res = await authFetch(`${API_URL}/api/fuero-maternal`);
+  const data = await res.json();
+  if (!res.ok) throw new Error(data.error || 'Error al listar el fuero maternal');
+  return data;
+}
+
+export async function crearFueroMaternal(datos) {
+  const res = await authFetch(`${API_URL}/api/fuero-maternal`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(datos),
+  });
+  const data = await res.json();
+  if (!res.ok || !data.ok) throw new Error(data.error || 'Error al registrar el fuero maternal');
+  return data;
+}
+
+export async function editarFueroMaternal(id, datos) {
+  const res = await authFetch(`${API_URL}/api/fuero-maternal/${id}`, {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(datos),
+  });
+  const data = await res.json();
+  if (!res.ok || !data.ok) throw new Error(data.error || 'Error al editar el fuero maternal');
+  return data;
+}
+
+export async function eliminarFueroMaternal(id) {
+  const res = await authFetch(`${API_URL}/api/fuero-maternal/${id}`, { method: 'DELETE' });
+  const data = await res.json();
+  if (!res.ok || !data.ok) throw new Error(data.error || 'Error al eliminar el registro');
+  return data;
+}
+
 export async function actualizarEmpleado(rut, datos) {
   const res = await authFetch(`${API_URL}/api/empleados/${encodeURIComponent(rut)}`, {
     method: 'PUT',
@@ -709,6 +895,10 @@ export async function actualizarEmpleado(rut, datos) {
     body: JSON.stringify(datos),
   });
   const data = await res.json();
-  if (!res.ok) throw new Error(data.error || 'Error al actualizar el trabajador');
+  if (!res.ok) {
+    const err = new Error(data.error || 'Error al actualizar el trabajador');
+    if (data.requiereConfirmacionDesafuero) err.requiereConfirmacionDesafuero = true;
+    throw err;
+  }
   return data;
 }

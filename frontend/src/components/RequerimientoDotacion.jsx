@@ -2,7 +2,7 @@ import { useState, useEffect, useCallback } from 'react';
 import {
   listarRequerimientoDotacion, listarRequerimientoDotacionVigente, guardarRequerimientoDotacionMasivo,
   eliminarRequerimientoDotacion, listarCargosRequerimiento, crearCargoRequerimiento, eliminarCargoRequerimiento,
-  crearRequerimientoDotacion,
+  crearRequerimientoDotacion, editarRequerimientoDotacion, listarCds,
 } from '../api';
 
 function hoyISO() {
@@ -76,7 +76,7 @@ function PanelCargos({ cargos, onCambio }) {
   );
 }
 
-function MatrizRequerimiento({ cargos, onGuardado }) {
+function MatrizRequerimiento({ cargos, cd, onGuardado }) {
   const [valores, setValores] = useState({}); // clave `${cargo}|${turno}` -> string
   const [vigenteDesde, setVigenteDesde] = useState(hoyISO());
   const [observacion, setObservacion] = useState('');
@@ -86,9 +86,10 @@ function MatrizRequerimiento({ cargos, onGuardado }) {
   const [mensajeOk, setMensajeOk] = useState(null);
 
   const cargarVigente = useCallback(async () => {
+    if (!cd) return;
     setCargando(true);
     try {
-      const vigente = await listarRequerimientoDotacionVigente(hoyISO());
+      const vigente = await listarRequerimientoDotacionVigente(hoyISO(), cd);
       const mapa = {};
       for (const v of vigente) {
         mapa[`${v.cargo}|${v.turno || ''}`] = String(v.cantidad_requerida);
@@ -99,7 +100,7 @@ function MatrizRequerimiento({ cargos, onGuardado }) {
     } finally {
       setCargando(false);
     }
-  }, []);
+  }, [cd]);
 
   useEffect(() => { cargarVigente(); }, [cargarVigente]);
 
@@ -108,6 +109,7 @@ function MatrizRequerimiento({ cargos, onGuardado }) {
   }
 
   async function guardarTodo() {
+    if (!cd) { setError('Elige un CD arriba antes de guardar.'); return; }
     setGuardando(true);
     setError(null);
     setMensajeOk(null);
@@ -126,8 +128,8 @@ function MatrizRequerimiento({ cargos, onGuardado }) {
         setGuardando(false);
         return;
       }
-      const resultado = await guardarRequerimientoDotacionMasivo({ vigente_desde: vigenteDesde, observacion, items });
-      setMensajeOk(`✓ ${resultado.guardados} celdas guardadas.`);
+      const resultado = await guardarRequerimientoDotacionMasivo({ vigente_desde: vigenteDesde, cd, observacion, items });
+      setMensajeOk(`✓ ${resultado.guardados} celdas guardadas para ${cd}.`);
       setObservacion('');
       onGuardado();
     } catch (err) {
@@ -141,11 +143,11 @@ function MatrizRequerimiento({ cargos, onGuardado }) {
     <div className="card" style={{ marginBottom: 20 }}>
       <h2>Matriz de requerimiento (Cargo × Turno)</h2>
       <p className="card-desc">
-        Completa la cantidad requerida por cargo y turno. Los valores ya vigentes vienen precargados;
-        cambia solo lo que necesites y guarda — cada celda modificada queda como un nuevo registro
-        en el historial, sin perder lo anterior. Esto queda <strong>abierto</strong> (sin fecha de
-        término) hasta que registres un cambio nuevo o cierres el período abajo en "Registro
-        histórico con rango".
+        Completa la cantidad requerida por cargo y turno <strong>para el CD elegido arriba</strong>.
+        Los valores ya vigentes de ese CD vienen precargados; cambia solo lo que necesites y guarda —
+        cada celda modificada queda como un nuevo registro en el historial, sin perder lo anterior.
+        Esto queda <strong>abierto</strong> (sin fecha de término) hasta que registres un cambio nuevo
+        o cierres el período abajo en "Registro histórico con rango".
       </p>
 
       <div className="field-grid" style={{ marginBottom: 16, maxWidth: 700 }}>
@@ -163,12 +165,13 @@ function MatrizRequerimiento({ cargos, onGuardado }) {
         </div>
       </div>
 
+      {!cd && <p className="status-msg error">Elige un CD arriba para ver y editar su matriz.</p>}
       {error && <p className="status-msg error">{error}</p>}
       {mensajeOk && <p className="status-msg ok">{mensajeOk}</p>}
 
-      {cargando ? (
+      {cd && cargando ? (
         <p className="status-msg">Cargando valores vigentes…</p>
-      ) : (
+      ) : cd && (
         <div className="table-scroll">
           <table>
             <thead>
@@ -205,7 +208,7 @@ function MatrizRequerimiento({ cargos, onGuardado }) {
       )}
 
       <div className="btn-row">
-        <button className="btn" type="button" disabled={guardando || cargando} onClick={guardarTodo}>
+        <button className="btn" type="button" disabled={guardando || cargando || !cd} onClick={guardarTodo}>
           {guardando ? 'Guardando…' : 'Guardar cambios'}
         </button>
       </div>
@@ -216,7 +219,7 @@ function MatrizRequerimiento({ cargos, onGuardado }) {
 // Registro histórico puntual: un solo cargo+turno, con Desde y Hasta
 // explícitos — para reconstruir un período pasado (ej. "en julio, en Renca,
 // el requerido era X") sin afectar el requerimiento vigente actual.
-function RegistroHistorico({ cargos, onGuardado }) {
+function RegistroHistorico({ cargos, cd, onGuardado }) {
   const [cargo, setCargo] = useState('');
   const [turno, setTurno] = useState('AM');
   const [cantidad, setCantidad] = useState('');
@@ -231,16 +234,17 @@ function RegistroHistorico({ cargos, onGuardado }) {
 
   async function guardar(e) {
     e.preventDefault();
+    if (!cd) { setError('Elige un CD arriba antes de registrar.'); return; }
     if (!cargo || !cantidad || !desde) { setError('Cargo, cantidad y fecha desde son obligatorios.'); return; }
     setGuardando(true);
     setError(null);
     setMensajeOk(null);
     try {
       await crearRequerimientoDotacion({
-        cargo, turno, cantidad_requerida: Number(cantidad), vigente_desde: desde,
+        cargo, turno, cd, cantidad_requerida: Number(cantidad), vigente_desde: desde,
         vigente_hasta: hasta || undefined, observacion,
       });
-      setMensajeOk(`✓ Registrado: ${cargo} / ${turno} = ${cantidad}, desde ${desde}${hasta ? ` hasta ${hasta}` : ' (sin fecha de término)'}.`);
+      setMensajeOk(`✓ Registrado en ${cd}: ${cargo} / ${turno} = ${cantidad}, desde ${desde}${hasta ? ` hasta ${hasta}` : ' (sin fecha de término)'}.`);
       setCantidad(''); setHasta(''); setObservacion('');
       onGuardado();
     } catch (err) {
@@ -296,7 +300,7 @@ function RegistroHistorico({ cargos, onGuardado }) {
         {error && <p className="status-msg error">{error}</p>}
         {mensajeOk && <p className="status-msg ok">{mensajeOk}</p>}
         <div className="btn-row">
-          <button className="btn" type="submit" disabled={guardando || cargos.length === 0}>
+          <button className="btn" type="submit" disabled={guardando || cargos.length === 0 || !cd}>
             {guardando ? 'Guardando…' : 'Registrar'}
           </button>
         </div>
@@ -305,8 +309,95 @@ function RegistroHistorico({ cargos, onGuardado }) {
   );
 }
 
+function FilaHistorial({ h, esVigente, onEliminar, onGuardado }) {
+  const [editando, setEditando] = useState(false);
+  const [cantidad, setCantidad] = useState(h.cantidad_requerida);
+  const [vigenteHasta, setVigenteHasta] = useState(h.vigente_hasta || '');
+  const [observacion, setObservacion] = useState(h.observacion || '');
+  const [guardando, setGuardando] = useState(false);
+  const [error, setError] = useState(null);
+
+  async function guardar() {
+    if (vigenteHasta && vigenteHasta < h.vigente_desde) {
+      setError('Vigente hasta no puede ser anterior a Vigente desde.');
+      return;
+    }
+    setGuardando(true);
+    setError(null);
+    try {
+      await editarRequerimientoDotacion(h.id, {
+        cantidad_requerida: Number(cantidad), vigente_hasta: vigenteHasta || null, observacion,
+      });
+      setEditando(false);
+      onGuardado();
+    } catch (err) {
+      setError(err.message);
+    } finally {
+      setGuardando(false);
+    }
+  }
+
+  return (
+    <>
+      <tr style={esVigente ? { background: 'rgba(63,174,106,0.08)' } : undefined}>
+        <td style={{ fontFamily: 'var(--font-sans)' }}>{h.cargo}</td>
+        <td>
+          {h.turno || '—'}
+          {esVigente && <span className="badge badge-ok" style={{ marginLeft: 8 }}>Vigente</span>}
+        </td>
+        <td style={{ fontFamily: 'var(--font-sans)' }}>{h.cd || '—'}</td>
+        <td>{h.cantidad_requerida}</td>
+        <td>{h.vigente_desde}</td>
+        <td>{h.vigente_hasta || <span className="badge badge-muted">Sin término</span>}</td>
+        <td style={{ fontFamily: 'var(--font-sans)', whiteSpace: 'normal', minWidth: 260 }}>{h.observacion || '—'}</td>
+        <td style={{ fontFamily: 'var(--font-sans)' }}>{h.creado_por || '—'}</td>
+        <td style={{ display: 'flex', gap: 10 }}>
+          <button
+            type="button" onClick={() => setEditando(v => !v)}
+            style={{ background: 'none', border: 'none', color: 'var(--accent)', cursor: 'pointer', fontSize: '0.78rem' }}
+          >
+            {editando ? 'Cerrar' : 'Editar'}
+          </button>
+          <button
+            type="button" onClick={onEliminar}
+            style={{ background: 'none', border: 'none', color: 'var(--danger)', cursor: 'pointer', fontSize: '0.78rem' }}
+          >
+            Eliminar
+          </button>
+        </td>
+      </tr>
+      {editando && (
+        <tr>
+          <td colSpan={9} style={{ background: 'var(--surface-2)', padding: 14 }}>
+            <div className="field-grid" style={{ marginBottom: 10 }}>
+              <div className="field">
+                <label>Cantidad requerida</label>
+                <input type="number" min="0" value={cantidad} onChange={e => setCantidad(e.target.value)} className="file-input" />
+              </div>
+              <div className="field">
+                <label>Vigente hasta (vacío = sin término / sigue vigente)</label>
+                <input type="date" value={vigenteHasta} min={h.vigente_desde} onChange={e => setVigenteHasta(e.target.value)} className="file-input" />
+              </div>
+              <div className="field">
+                <label>Observación</label>
+                <input type="text" value={observacion} onChange={e => setObservacion(e.target.value)} className="file-input" />
+              </div>
+            </div>
+            {error && <p className="status-msg error">{error}</p>}
+            <button className="btn" type="button" disabled={guardando} onClick={guardar}>
+              {guardando ? 'Guardando…' : 'Guardar cambios'}
+            </button>
+          </td>
+        </tr>
+      )}
+    </>
+  );
+}
+
 export default function RequerimientoDotacion() {
   const [cargos, setCargos] = useState([]);
+  const [cds, setCds] = useState([]);
+  const [cd, setCd] = useState('');
   const [historial, setHistorial] = useState([]);
   const [filtroCargo, setFiltroCargo] = useState('');
   const [cargando, setCargando] = useState(false);
@@ -321,17 +412,25 @@ export default function RequerimientoDotacion() {
     }
   }, []);
 
+  useEffect(() => {
+    listarCds().then(lista => {
+      setCds(lista);
+      if (lista.length > 0) setCd(prev => prev || lista[0]);
+    }).catch(() => {});
+  }, []);
+
   const cargarHistorial = useCallback(async () => {
+    if (!cd) { setHistorial([]); return; }
     setCargando(true);
     setError(null);
     try {
-      setHistorial(await listarRequerimientoDotacion(filtroCargo || undefined));
+      setHistorial(await listarRequerimientoDotacion(filtroCargo || undefined, cd));
     } catch (err) {
       setError(err.message);
     } finally {
       setCargando(false);
     }
-  }, [filtroCargo]);
+  }, [filtroCargo, cd]);
 
   useEffect(() => { cargarCargos(); }, [cargarCargos]);
   useEffect(() => { cargarHistorial(); }, [cargarHistorial, refrescarSenal]);
@@ -358,13 +457,30 @@ export default function RequerimientoDotacion() {
 
   return (
     <div>
+      <div className="card" style={{ marginBottom: 20, borderColor: 'var(--accent)' }}>
+        <h2>CD (Centro de Distribución)</h2>
+        <p className="card-desc">
+          El requerimiento de dotación es específico de cada CD — elige con cuál vas a trabajar. Todo
+          lo de abajo (matriz, registro histórico e historial) corresponde solo a este CD.
+        </p>
+        <div className="field" style={{ maxWidth: 320 }}>
+          <select
+            value={cd} onChange={e => setCd(e.target.value)}
+            style={{ background: 'var(--surface-2)', border: '1px solid var(--accent)', borderRadius: 8, padding: '10px 12px', color: 'var(--text)', fontSize: '0.9rem', fontWeight: 600 }}
+          >
+            <option value="">— Elegir CD —</option>
+            {cds.map(c => <option key={c} value={c}>{c}</option>)}
+          </select>
+        </div>
+      </div>
+
       <PanelCargos cargos={cargos} onCambio={cargarCargos} />
-      <MatrizRequerimiento cargos={cargos} onGuardado={refrescarTodo} />
-      <RegistroHistorico cargos={cargos} onGuardado={refrescarTodo} />
+      <MatrizRequerimiento cargos={cargos} cd={cd} onGuardado={refrescarTodo} />
+      <RegistroHistorico cargos={cargos} cd={cd} onGuardado={refrescarTodo} />
 
       <div className="card">
-        <h2>Historial de requerimiento por cargo y turno</h2>
-        <p className="card-desc">El registro más reciente de cada combinación cargo+turno (resaltado) es el vigente actualmente.</p>
+        <h2>Historial de requerimiento por cargo y turno {cd && `— ${cd}`}</h2>
+        <p className="card-desc">El registro más reciente de cada combinación cargo+turno (resaltado) es el vigente actualmente, para este CD.</p>
 
         <div className="filters-row">
           <div className="field">
@@ -376,6 +492,7 @@ export default function RequerimientoDotacion() {
           </div>
         </div>
 
+        {!cd && <p className="status-msg error">Elige un CD arriba para ver su historial.</p>}
         {error && <p className="status-msg error">{error}</p>}
 
         <div className="table-scroll">
@@ -384,6 +501,7 @@ export default function RequerimientoDotacion() {
               <tr>
                 <th>Cargo</th>
                 <th>Turno</th>
+                <th>CD</th>
                 <th>Cantidad requerida</th>
                 <th>Vigente desde</th>
                 <th>Vigente hasta</th>
@@ -397,32 +515,17 @@ export default function RequerimientoDotacion() {
                 const clave = `${h.cargo}|${h.turno || ''}`;
                 const esVigente = vigentePorClave.get(clave) === h.id;
                 return (
-                  <tr key={h.id} style={esVigente ? { background: 'rgba(63,174,106,0.08)' } : undefined}>
-                    <td style={{ fontFamily: 'var(--font-sans)' }}>{h.cargo}</td>
-                    <td>
-                      {h.turno || '—'}
-                      {esVigente && <span className="badge badge-ok" style={{ marginLeft: 8 }}>Vigente</span>}
-                    </td>
-                    <td>{h.cantidad_requerida}</td>
-                    <td>{h.vigente_desde}</td>
-                    <td>{h.vigente_hasta || <span className="badge badge-muted">Sin término</span>}</td>
-                    <td style={{ fontFamily: 'var(--font-sans)', whiteSpace: 'normal', minWidth: 260 }}>{h.observacion || '—'}</td>
-                    <td style={{ fontFamily: 'var(--font-sans)' }}>{h.creado_por || '—'}</td>
-                    <td>
-                      <button
-                        type="button" onClick={() => eliminar(h.id)}
-                        style={{ background: 'none', border: 'none', color: 'var(--danger)', cursor: 'pointer', fontSize: '0.78rem' }}
-                      >
-                        Eliminar
-                      </button>
-                    </td>
-                  </tr>
+                  <FilaHistorial
+                    key={h.id} h={h} esVigente={esVigente}
+                    onEliminar={() => eliminar(h.id)}
+                    onGuardado={refrescarTodo}
+                  />
                 );
               })}
             </tbody>
           </table>
-          {!cargando && historial.length === 0 && (
-            <div className="empty-state">No hay registros todavía.</div>
+          {!cargando && cd && historial.length === 0 && (
+            <div className="empty-state">No hay registros todavía para este CD.</div>
           )}
         </div>
       </div>

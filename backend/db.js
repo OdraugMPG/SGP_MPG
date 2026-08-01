@@ -72,6 +72,43 @@ async function initDb() {
     );
     CREATE INDEX IF NOT EXISTS idx_rotacion_lookup ON rotacion_turnos(sem, jefe_turno, dia);
 
+    CREATE TABLE IF NOT EXISTS horario_plano (
+      dia TEXT PRIMARY KEY,
+      hora_entrada TEXT NOT NULL,
+      hora_salida TEXT NOT NULL
+    );
+
+    -- Preparada para la futura autorización de horas extras (aún sin flujo
+    -- de aprobación activo) — por defecto todo queda "no autorizado" hasta
+    -- que se construya ese módulo.
+    CREATE TABLE IF NOT EXISTS horas_extras_autorizacion (
+      rut TEXT NOT NULL,
+      fecha TEXT NOT NULL,
+      autorizado BOOLEAN DEFAULT false,
+      autorizado_por TEXT,
+      autorizado_en TIMESTAMP,
+      observacion TEXT,
+      PRIMARY KEY (rut, fecha)
+    );
+
+    -- Registro de embarazo / fuero maternal (Art. 201 Código del Trabajo).
+    -- Dato sensible: acceso restringido al módulo "fueroMaternal" (RRHH/admin
+    -- por defecto), y usado para bloquear desvinculaciones sin autorización
+    -- judicial mientras el fuero esté vigente.
+    CREATE TABLE IF NOT EXISTS fuero_maternal (
+      id SERIAL PRIMARY KEY,
+      rut TEXT NOT NULL,
+      fecha_probable_parto TEXT,
+      fecha_inicio_fuero TEXT NOT NULL,
+      fecha_termino_fuero TEXT,
+      fecha_parto_real TEXT,
+      restriccion_turno BOOLEAN DEFAULT false,
+      observaciones TEXT,
+      registrado_por TEXT,
+      registrado_en TIMESTAMP DEFAULT now()
+    );
+    CREATE INDEX IF NOT EXISTS idx_fuero_maternal_rut ON fuero_maternal(rut);
+
     CREATE TABLE IF NOT EXISTS contrato_rut (
       rut TEXT PRIMARY KEY,
       razon_social TEXT
@@ -175,6 +212,7 @@ async function initDb() {
       id SERIAL PRIMARY KEY,
       cargo TEXT NOT NULL,
       turno TEXT,
+      cd TEXT,
       cantidad_requerida INTEGER NOT NULL,
       vigente_desde TEXT NOT NULL,
       vigente_hasta TEXT,
@@ -214,9 +252,12 @@ async function initDb() {
 
   await pool.query('ALTER TABLE empleados ADD COLUMN IF NOT EXISTS activo BOOLEAN DEFAULT true');
   await pool.query('ALTER TABLE empleados ADD COLUMN IF NOT EXISTS motivo_inactivo TEXT');
+  await pool.query("ALTER TABLE empleados ADD COLUMN IF NOT EXISTS motivo_termino TEXT"); // 'R' (Renuncia Voluntaria) o 'Des' (Desvinculación Art. 161)
+  await pool.query('ALTER TABLE empleados ADD COLUMN IF NOT EXISTS fecha_termino TEXT');
   await pool.query('ALTER TABLE empleados ADD COLUMN IF NOT EXISTS tipo_contrato TEXT');
   await pool.query('ALTER TABLE requerimiento_dotacion ADD COLUMN IF NOT EXISTS turno TEXT');
   await pool.query('ALTER TABLE requerimiento_dotacion ADD COLUMN IF NOT EXISTS vigente_hasta TEXT');
+  await pool.query('ALTER TABLE requerimiento_dotacion ADD COLUMN IF NOT EXISTS cd TEXT');
   await pool.query('ALTER TABLE empleados ADD COLUMN IF NOT EXISTS cd TEXT');
   await pool.query('ALTER TABLE usuarios ADD COLUMN IF NOT EXISTS cds_visibles TEXT[]');
   await pool.query('ALTER TABLE ausencias_permisos ADD COLUMN IF NOT EXISTS documento_id INTEGER REFERENCES documentos_respaldo(id)');
@@ -247,8 +288,8 @@ async function initDb() {
   // razonable de módulos por defecto, que el administrador puede ajustar
   // libremente desde "Usuarios" — incluyendo crear roles nuevos.
   const TODOS_LOS_MODULOS = [
-    'dashboard', 'resultados', 'detalle', 'reporte', 'nomina', 'asignacion', 'perfiles',
-    'requerimiento', 'ausencias', 'actualizacion', 'carga', 'usuarios',
+    'dashboard', 'resultados', 'detalle', 'reporte', 'nomina', 'horasExtras', 'asignacion', 'perfiles',
+    'requerimiento', 'ausencias', 'actualizacion', 'carga', 'usuarios', 'fueroMaternal',
   ];
   const rolesIniciales = [
     { nombre: 'admin', modulos: TODOS_LOS_MODULOS, es_sistema: true },
@@ -258,12 +299,28 @@ async function initDb() {
     { nombre: 'Jefe Turno', modulos: ['dashboard', 'resultados', 'reporte', 'asignacion', 'ausencias'], es_sistema: false },
     { nombre: 'Supervisor', modulos: ['resultados', 'reporte', 'ausencias', 'actualizacion'], es_sistema: false },
     { nombre: 'KAM', modulos: ['dashboard', 'reporte'], es_sistema: false },
-    { nombre: 'RRHH', modulos: ['dashboard', 'resultados', 'perfiles', 'ausencias', 'requerimiento', 'nomina'], es_sistema: false },
+    { nombre: 'RRHH', modulos: ['dashboard', 'resultados', 'perfiles', 'ausencias', 'requerimiento', 'nomina', 'fueroMaternal'], es_sistema: false },
   ];
   for (const r of rolesIniciales) {
     await pool.query(
       'INSERT INTO roles (nombre, modulos, es_sistema) VALUES ($1,$2,$3) ON CONFLICT (nombre) DO NOTHING',
       [r.nombre, r.modulos, r.es_sistema]
+    );
+  }
+
+  // Siembra inicial del horario Plano (los mismos valores que antes estaban
+  // fijos en el código — se puede seguir ajustando desde el módulo).
+  const horarioPlanoInicial = [
+    ['Lun', '08:00:00', '17:30:00'],
+    ['Mar', '08:00:00', '17:30:00'],
+    ['Mié', '08:00:00', '17:30:00'],
+    ['Jue', '08:00:00', '16:00:00'],
+    ['Vie', '08:00:00', '16:00:00'],
+  ];
+  for (const [dia, hora_entrada, hora_salida] of horarioPlanoInicial) {
+    await pool.query(
+      'INSERT INTO horario_plano (dia, hora_entrada, hora_salida) VALUES ($1,$2,$3) ON CONFLICT (dia) DO NOTHING',
+      [dia, hora_entrada, hora_salida]
     );
   }
 
@@ -298,7 +355,25 @@ async function initDb() {
     }
   }
 
+  // Transición automática: los trabajadores con renuncia/desvinculación
+  // registrada cuyo mes de término ya quedó completamente atrás pasan a
+  // inactivo automáticamente (mientras el mes de término sigue en curso,
+  // permanecen activos para no perder su procesamiento de ese mes).
+  await procesarTransicionesTermino(pool);
+
   return pool;
 }
 
-module.exports = { initDb };
+async function procesarTransicionesTermino(pool) {
+  const { rowCount } = await pool.query(`
+    UPDATE empleados
+    SET activo = false
+    WHERE activo = true
+      AND motivo_termino IS NOT NULL
+      AND fecha_termino < date_trunc('month', CURRENT_DATE)::date::text
+  `);
+  if (rowCount > 0) console.log(`${rowCount} trabajador(es) pasaron a inactivo automáticamente (mes de término ya cerrado).`);
+  return rowCount;
+}
+
+module.exports = { initDb, procesarTransicionesTermino };

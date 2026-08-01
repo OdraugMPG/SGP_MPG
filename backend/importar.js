@@ -77,6 +77,39 @@ function resolverJefeTurno(codigo) {
 // Determina el tipo de turno (AM/PM/NOCHE/PLANO) de un código de jefe de turno
 // para una fecha dada, usando el mapa de 'rotacion_base' construido a partir
 // de la tabla rotacion_turnos (key 'sem|jefe_turno' -> 'AM'|'PM'|'NOCHE').
+// Construye el mapa "semana|jefe_turno -> AM/PM/NOCHE" a partir de las filas
+// de rotacion_turnos. Cuando la columna rotacion_base viene vacía (dato
+// faltante en el archivo de Parámetros), se deriva un valor de respaldo
+// según la hora de entrada de esa fila, para que el tipo de turno NUNCA
+// quede "sin asignar" solo por un dato faltante.
+// Deriva AM/PM/NOCHE a partir de una hora de entrada 'HH:MM:SS', sin
+// necesitar nada más — usado como respaldo cuando no hay rotacion_base.
+function tipoTurnoDesdeHoraEntrada(horaEntrada) {
+  if (!horaEntrada) return null;
+  const hora = parseInt(horaEntrada.slice(0, 2), 10);
+  if (hora >= 4 && hora < 12) return 'AM';
+  if (hora >= 12 && hora < 19) return 'PM';
+  return 'NOCHE';
+}
+
+// Construye el mapa "semana|jefe_turno -> AM/PM/NOCHE" a partir de las filas
+// de rotacion_turnos. Cuando la columna rotacion_base viene vacía (dato
+// faltante en el archivo de Parámetros), se deriva un valor de respaldo
+// según la hora de entrada de esa fila, para que el tipo de turno NUNCA
+// quede "sin asignar" solo por un dato faltante.
+function construirRotacionBasePorClave(rotacionRows) {
+  const mapa = new Map();
+  for (const r of rotacionRows) {
+    const clave = `${r.sem}|${r.jefe_turno}`;
+    if (r.rotacion_base) {
+      mapa.set(clave, r.rotacion_base);
+    } else if (!mapa.has(clave) && r.hora_entrada) {
+      mapa.set(clave, tipoTurnoDesdeHoraEntrada(r.hora_entrada));
+    }
+  }
+  return mapa;
+}
+
 function determinarTipoTurno(codigoJefeTurno, fecha, rotacionBasePorClave) {
   if (!codigoJefeTurno) return null;
   if (codigoJefeTurno === 'CG' || codigoJefeTurno === 'PLANO') return 'PLANO';
@@ -627,5 +660,5 @@ module.exports = {
   diaDeSemana, semanaISO, resolverJefeTurno, toFechaISO, toHoraStr,
   contratoDesdeRazonSocial, sumarDias, fusionarTurnosNocturnos, limpiarRut,
   activarEmpleadosDesdeArchivo, actualizarAreasDesdeArchivo, actualizarJefeTurnoDesdeArchivo,
-  determinarTipoTurno, minutosAjusteColacion, actualizarCdDesdeMarcaciones,
+  determinarTipoTurno, minutosAjusteColacion, actualizarCdDesdeMarcaciones, construirRotacionBasePorClave, tipoTurnoDesdeHoraEntrada,
 };

@@ -1,4 +1,4 @@
-const { diaDeSemana, semanaISO, resolverJefeTurno, determinarTipoTurno, sumarDias } = require('./importar');
+const { diaDeSemana, semanaISO, resolverJefeTurno, determinarTipoTurno, sumarDias, construirRotacionBasePorClave } = require('./importar');
 const XLSX = require('xlsx');
 
 // Cargos relevantes para los dashboards gerenciales (línea de tiempo). Se
@@ -136,7 +136,7 @@ async function calcularIndicadores(pool, filtros) {
   const { desde, hasta, area, cds } = filtros; // cds: null (todos) o arreglo de CDs permitidos/solicitados
 
   // --- Universo de trabajadores activos (filtrado por área y/o CD si corresponde) ---
-  let sqlEmp = 'SELECT rut, nombre, apellido_paterno, cargo, centro_costo FROM empleados WHERE activo = true';
+  let sqlEmp = 'SELECT rut, nombre, apellido_paterno, cargo, centro_costo, cd FROM empleados WHERE activo = true';
   const paramsEmp = [];
   if (area) { paramsEmp.push(area); sqlEmp += ` AND centro_costo = $${paramsEmp.length}`; }
   if (cds) { paramsEmp.push(cds); sqlEmp += ` AND cd = ANY($${paramsEmp.length}::text[])`; }
@@ -164,13 +164,10 @@ async function calcularIndicadores(pool, filtros) {
   const { rows: asignaciones } = await pool.query('SELECT rut, jefe_turno FROM jefe_turno_asignacion');
   const jefeTurnoPorRut = new Map(asignaciones.map(a => [a.rut, a.jefe_turno]));
   const { rows: rotacionRows } = await pool.query(
-    'SELECT sem, jefe_turno, dia, hora_salida, rotacion_base FROM rotacion_turnos'
+    'SELECT sem, jefe_turno, dia, hora_entrada, hora_salida, rotacion_base FROM rotacion_turnos'
   );
   const rotacionMap = new Map(rotacionRows.map(r => [`${r.sem}|${r.jefe_turno}|${r.dia}`, r.hora_salida]));
-  const rotacionBasePorClave = new Map();
-  for (const r of rotacionRows) {
-    if (r.rotacion_base) rotacionBasePorClave.set(`${r.sem}|${r.jefe_turno}`, r.rotacion_base);
-  }
+  const rotacionBasePorClave = construirRotacionBasePorClave(rotacionRows);
   const TOLERANCIA_SALIDA_MIN = 15;
 
   let salidasAnticipadas = 0;
@@ -251,43 +248,49 @@ async function calcularIndicadores(pool, filtros) {
     }
   }
 
-  // --- Cumplimiento de dotación (por cargo, día por día, respetando el
+  // --- Cumplimiento de dotación (por CARGO + CD, día por día, respetando el
   // descanso de cada turno para no exigir dotación en días que nadie de ese
-  // turno debería trabajar) ---
-  const { rows: historialReq } = await pool.query(
-    `SELECT cargo, turno, vigente_desde, vigente_hasta, cantidad_requerida FROM requerimiento_dotacion
-     WHERE vigente_desde <= $1 ORDER BY cargo, turno, vigente_desde ASC`,
-    [hasta]
-  );
-  const historialReqPorGrupo = new Map(); // `${cargo}|${turno}` -> [{vigente_desde, vigente_hasta, cantidad_requerida}]
-  const cargosConRequerimiento = new Set();
+  // turno debería trabajar). El requerimiento es específico de cada CD — el
+  // de un CD no debe aplicarse a los trabajadores de otro. ---
+  let sqlHistorialReq = `SELECT cargo, turno, cd, vigente_desde, vigente_hasta, cantidad_requerida FROM requerimiento_dotacion
+     WHERE vigente_desde <= $1`;
+  const paramsHistorialReq = [hasta];
+  if (cds) { paramsHistorialReq.push(cds); sqlHistorialReq += ` AND cd = ANY($${paramsHistorialReq.length}::text[])`; }
+  sqlHistorialReq += ' ORDER BY cargo, cd, turno, vigente_desde ASC';
+  const { rows: historialReq } = await pool.query(sqlHistorialReq, paramsHistorialReq);
+
+  const historialReqPorGrupo = new Map(); // `${cargo}|${turno}|${cd}` -> [{vigente_desde, vigente_hasta, cantidad_requerida}]
+  const cargoCdConRequerimiento = new Set(); // `${cargo}|${cd}`
   for (const r of historialReq) {
-    const clave = `${r.cargo}|${r.turno}`;
+    const clave = `${r.cargo}|${r.turno}|${r.cd}`;
     if (!historialReqPorGrupo.has(clave)) historialReqPorGrupo.set(clave, []);
     historialReqPorGrupo.get(clave).push(r);
-    cargosConRequerimiento.add(r.cargo);
+    cargoCdConRequerimiento.add(`${r.cargo}|${r.cd}`);
   }
-  function requeridoVigenteCargoTurno(cargo, turno, fecha) {
-    const registros = historialReqPorGrupo.get(`${cargo}|${turno}`) || [];
+  function requeridoVigenteCargoTurnoCd(cargo, turno, cd, fecha) {
+    const registros = historialReqPorGrupo.get(`${cargo}|${turno}|${cd}`) || [];
     return valorVigenteEnFecha(registros, fecha) || 0;
   }
 
   const fechasCumplimiento = await fechasValidas(pool, desde, hasta);
 
-  // Presentes por día, agrupados por cargo (todos los turnos juntos).
-  const presentesPorCargoDia = new Map(); // `${fecha}|${cargo}` -> Set(rut)
+  // Presentes por día, agrupados por cargo + CD (todos los turnos juntos),
+  // usando el CD propio de cada trabajador (empleados.cd).
+  const presentesPorCargoCdDia = new Map(); // `${fecha}|${cargo}|${cd}` -> Set(rut)
   for (const r of resultadosFiltrados) {
     if (!(r.marco_talana || r.marco_cencosud)) continue;
     const emp = empleadoPorRut.get(r.rut);
-    if (!emp || !emp.cargo || !cargosConRequerimiento.has(emp.cargo)) continue;
-    const clave = `${r.fecha}|${emp.cargo}`;
-    if (!presentesPorCargoDia.has(clave)) presentesPorCargoDia.set(clave, new Set());
-    presentesPorCargoDia.get(clave).add(r.rut);
+    if (!emp || !emp.cargo || !emp.cd) continue;
+    const claveCargoCd = `${emp.cargo}|${emp.cd}`;
+    if (!cargoCdConRequerimiento.has(claveCargoCd)) continue;
+    const clave = `${r.fecha}|${claveCargoCd}`;
+    if (!presentesPorCargoCdDia.has(clave)) presentesPorCargoCdDia.set(clave, new Set());
+    presentesPorCargoCdDia.get(clave).add(r.rut);
   }
 
-  const sumaRequeridoPorCargoDia = {};
-  const sumaPresentePorCargoDia = {};
-  for (const cargo of cargosConRequerimiento) { sumaRequeridoPorCargoDia[cargo] = 0; sumaPresentePorCargoDia[cargo] = 0; }
+  const sumaRequeridoPorCargoCdDia = {};
+  const sumaPresentePorCargoCdDia = {};
+  for (const claveCargoCd of cargoCdConRequerimiento) { sumaRequeridoPorCargoCdDia[claveCargoCd] = 0; sumaPresentePorCargoCdDia[claveCargoCd] = 0; }
 
   const NOMBRES_DIA_SEMANA = ['Domingo', 'Lunes', 'Martes', 'Miércoles', 'Jueves', 'Viernes', 'Sábado'];
   const sumaRequeridoPorDiaSemana = {};
@@ -296,17 +299,18 @@ async function calcularIndicadores(pool, filtros) {
 
   for (const fecha of fechasCumplimiento) {
     const nombreDiaSemana = NOMBRES_DIA_SEMANA[new Date(fecha + 'T00:00:00').getDay()];
-    for (const cargo of cargosConRequerimiento) {
+    for (const claveCargoCd of cargoCdConRequerimiento) {
+      const [cargo, cd] = claveCargoCd.split('|');
       let requeridoDia = 0;
       for (const clave of historialReqPorGrupo.keys()) {
-        const [c, t] = clave.split('|');
-        if (c !== cargo) continue;
+        const [c, t, cdClave] = clave.split('|');
+        if (c !== cargo || cdClave !== cd) continue;
         if (esDiaLibreTipoTurno(t, fecha)) continue;
-        requeridoDia += requeridoVigenteCargoTurno(cargo, t, fecha);
+        requeridoDia += requeridoVigenteCargoTurnoCd(cargo, t, cd, fecha);
       }
-      const presenteDia = presentesPorCargoDia.get(`${fecha}|${cargo}`)?.size || 0;
-      sumaRequeridoPorCargoDia[cargo] += requeridoDia;
-      sumaPresentePorCargoDia[cargo] += presenteDia;
+      const presenteDia = presentesPorCargoCdDia.get(`${fecha}|${claveCargoCd}`)?.size || 0;
+      sumaRequeridoPorCargoCdDia[claveCargoCd] += requeridoDia;
+      sumaPresentePorCargoCdDia[claveCargoCd] += presenteDia;
       sumaRequeridoPorDiaSemana[nombreDiaSemana] += requeridoDia;
       sumaPresentePorDiaSemana[nombreDiaSemana] += presenteDia;
     }
@@ -329,27 +333,31 @@ async function calcularIndicadores(pool, filtros) {
     })
     .sort((a, b) => b.ausentismo_pct - a.ausentismo_pct);
 
-  // --- Recursos: contratados (activos) vs requerido vigente hoy/hasta, por cargo ---
-  const { rows: requerimientoVigenteHoy } = await pool.query(
-    `SELECT DISTINCT ON (cargo, turno) cargo, turno, cantidad_requerida
-     FROM requerimiento_dotacion WHERE vigente_desde <= $1 AND (vigente_hasta IS NULL OR vigente_hasta >= $1)
-     ORDER BY cargo, turno, vigente_desde DESC`,
-    [hasta]
-  );
-  const requeridoActualPorCargo = new Map();
+  // --- Recursos: contratados (activos) vs requerido vigente hoy/hasta, por CARGO + CD ---
+  let sqlVigenteHoy = `SELECT DISTINCT ON (cargo, turno, cd) cargo, turno, cd, cantidad_requerida
+     FROM requerimiento_dotacion WHERE vigente_desde <= $1 AND (vigente_hasta IS NULL OR vigente_hasta >= $1)`;
+  const paramsVigenteHoy = [hasta];
+  if (cds) { paramsVigenteHoy.push(cds); sqlVigenteHoy += ` AND cd = ANY($${paramsVigenteHoy.length}::text[])`; }
+  sqlVigenteHoy += ' ORDER BY cargo, turno, cd, vigente_desde DESC';
+  const { rows: requerimientoVigenteHoy } = await pool.query(sqlVigenteHoy, paramsVigenteHoy);
+
+  const requeridoActualPorCargoCd = new Map();
   for (const r of requerimientoVigenteHoy) {
-    requeridoActualPorCargo.set(r.cargo, (requeridoActualPorCargo.get(r.cargo) || 0) + r.cantidad_requerida);
+    const clave = `${r.cargo}|${r.cd}`;
+    requeridoActualPorCargoCd.set(clave, (requeridoActualPorCargoCd.get(clave) || 0) + r.cantidad_requerida);
   }
-  const contratadosPorCargo = new Map();
+  const contratadosPorCargoCd = new Map();
   for (const emp of empleados) {
-    if (!emp.cargo) continue;
-    contratadosPorCargo.set(emp.cargo, (contratadosPorCargo.get(emp.cargo) || 0) + 1);
+    if (!emp.cargo || !emp.cd) continue;
+    const clave = `${emp.cargo}|${emp.cd}`;
+    contratadosPorCargoCd.set(clave, (contratadosPorCargoCd.get(clave) || 0) + 1);
   }
-  const cargosParaBrecha = new Set([...requeridoActualPorCargo.keys(), ...contratadosPorCargo.keys()]);
-  const brechaRecursos = [...cargosParaBrecha].map(cargo => {
-    const requeridoActual = requeridoActualPorCargo.get(cargo) || 0;
-    const contratados = contratadosPorCargo.get(cargo) || 0;
-    return { cargo, requerido_actual: requeridoActual, contratados, brecha: requeridoActual - contratados };
+  const cargoCdParaBrecha = new Set([...requeridoActualPorCargoCd.keys(), ...contratadosPorCargoCd.keys()]);
+  const brechaRecursos = [...cargoCdParaBrecha].map(clave => {
+    const [cargo, cd] = clave.split('|');
+    const requeridoActual = requeridoActualPorCargoCd.get(clave) || 0;
+    const contratados = contratadosPorCargoCd.get(clave) || 0;
+    return { cargo, cd, requerido_actual: requeridoActual, contratados, brecha: requeridoActual - contratados };
   }).sort((a, b) => b.brecha - a.brecha);
 
   const nDiasCumplimiento = Math.max(1, fechasCumplimiento.length);
@@ -359,13 +367,15 @@ async function calcularIndicadores(pool, filtros) {
   const cumplimientoDetalle = [];
   let requeridoTotalPeriodo = 0;
   let presentesTotalPeriodo = 0;
-  for (const cargo of cargosConRequerimiento) {
-    const requeridoTotal = sumaRequeridoPorCargoDia[cargo];
-    const presentesTotal = sumaPresentePorCargoDia[cargo];
+  for (const claveCargoCd of cargoCdConRequerimiento) {
+    const [cargo, cd] = claveCargoCd.split('|');
+    const requeridoTotal = sumaRequeridoPorCargoCdDia[claveCargoCd];
+    const presentesTotal = sumaPresentePorCargoCdDia[claveCargoCd];
     requeridoTotalPeriodo += requeridoTotal;
     presentesTotalPeriodo += presentesTotal;
     cumplimientoDetalle.push({
       cargo,
+      cd,
       requerido: requeridoTotal,
       presentes: presentesTotal,
       promedio_presente: Math.round((presentesTotal / nDiasCumplimiento) * 10) / 10,
@@ -438,7 +448,7 @@ async function exportarReporteDesvinculacionXlsx(pool, filtros) {
 // El "requerido" usa el valor vigente en CADA día (no solo el de "hasta"),
 // para reflejar correctamente si el requerimiento cambió durante el período.
 async function calcularSerieCumplimiento(pool, filtros) {
-  const { desde, hasta, cargo, jefesTurno } = filtros; // jefesTurno: array de códigos, ej. ['T_RD','T_WP'] (opcional)
+  const { desde, hasta, cargo, jefesTurno, cds } = filtros; // cds: null (todos) o arreglo de CDs permitidos/solicitados
 
   const dIni = new Date(desde + 'T00:00:00');
   const dFin = new Date(hasta + 'T00:00:00');
@@ -449,17 +459,19 @@ async function calcularSerieCumplimiento(pool, filtros) {
 
   const filtraJefes = Array.isArray(jefesTurno) && jefesTurno.length > 0;
 
-  // Historial de requerimiento (filtrado por cargo si se indicó; el turno se
-  // resuelve más abajo día a día según los jefes de turno seleccionados).
-  let sqlReq = 'SELECT cargo, turno, vigente_desde, vigente_hasta, cantidad_requerida FROM requerimiento_dotacion WHERE 1=1';
+  // Historial de requerimiento (filtrado por cargo y/o CD si se indicó; el
+  // turno se resuelve más abajo día a día según los jefes de turno
+  // seleccionados). El requerimiento es específico de cada CD.
+  let sqlReq = 'SELECT cargo, turno, cd, vigente_desde, vigente_hasta, cantidad_requerida FROM requerimiento_dotacion WHERE 1=1';
   const paramsReq = [];
   if (cargo) { paramsReq.push(cargo); sqlReq += ` AND cargo = $${paramsReq.length}`; }
+  if (cds) { paramsReq.push(cds); sqlReq += ` AND cd = ANY($${paramsReq.length}::text[])`; }
   sqlReq += ' ORDER BY cargo, turno, vigente_desde ASC';
   const { rows: historial } = await pool.query(sqlReq, paramsReq);
 
-  const historialPorGrupo = new Map(); // clave `cargo|turno` -> [{vigente_desde, vigente_hasta, cantidad_requerida}]
+  const historialPorGrupo = new Map(); // clave `cargo|turno|cd` -> [{vigente_desde, vigente_hasta, cantidad_requerida}]
   for (const r of historial) {
-    const clave = `${r.cargo}|${r.turno}`;
+    const clave = `${r.cargo}|${r.turno}|${r.cd}`;
     if (!historialPorGrupo.has(clave)) historialPorGrupo.set(clave, []);
     historialPorGrupo.get(clave).push(r);
   }
@@ -490,9 +502,9 @@ async function calcularSerieCumplimiento(pool, filtros) {
   const { rows: asignaciones } = await pool.query('SELECT rut, jefe_turno FROM jefe_turno_asignacion');
   const jefeTurnoPorRut = new Map(asignaciones.map(a => [a.rut, a.jefe_turno]));
   const { rows: rotacionRows } = await pool.query(
-    'SELECT DISTINCT sem, jefe_turno, rotacion_base FROM rotacion_turnos WHERE rotacion_base IS NOT NULL'
+    'SELECT sem, jefe_turno, rotacion_base, hora_entrada FROM rotacion_turnos'
   );
-  const rotacionBasePorClave = new Map(rotacionRows.map(r => [`${r.sem}|${r.jefe_turno}`, r.rotacion_base]));
+  const rotacionBasePorClave = construirRotacionBasePorClave(rotacionRows);
 
   // Presentes por día.
   const presentesPorFecha = new Map();
@@ -502,6 +514,7 @@ async function calcularSerieCumplimiento(pool, filtros) {
      WHERE e.activo = true AND r.fecha BETWEEN $1 AND $2 AND (r.marco_talana = 1 OR r.marco_cencosud = 1)`;
   const paramsPres = [desde, hasta];
   if (cargo) { paramsPres.push(cargo); sqlPres += ` AND e.cargo = $${paramsPres.length}`; }
+  if (cds) { paramsPres.push(cds); sqlPres += ` AND e.cd = ANY($${paramsPres.length}::text[])`; }
   const { rows: presentesRaw } = await pool.query(sqlPres, paramsPres);
   for (const p of presentesRaw) {
     if (filtraJefes) {
@@ -544,15 +557,16 @@ async function calcularSerieCumplimiento(pool, filtros) {
 // grupos combinados). Cada mes se promedia usando fechasValidas (domingos
 // suprimidos salvo asistencia real).
 async function calcularPresentismoHistorico(pool, filtros) {
-  const { meses, jefesTurno } = filtros; // jefesTurno: array de códigos (opcional)
+  const { meses, jefesTurno, cd } = filtros; // jefesTurno: array de códigos (opcional); cd: string (opcional)
   if (!Array.isArray(meses) || meses.length === 0) throw new Error('Debes indicar al menos un mes');
   const filtraJefes = Array.isArray(jefesTurno) && jefesTurno.length > 0;
 
-  const { rows: historial } = await pool.query(
-    `SELECT cargo, turno, vigente_desde, vigente_hasta, cantidad_requerida FROM requerimiento_dotacion
-     WHERE cargo = ANY($1::text[]) ORDER BY cargo, turno, vigente_desde ASC`,
-    [CARGOS_DASHBOARD]
-  );
+  let sqlHistorial = `SELECT cargo, turno, vigente_desde, vigente_hasta, cantidad_requerida FROM requerimiento_dotacion
+     WHERE cargo = ANY($1::text[])`;
+  const paramsHistorial = [CARGOS_DASHBOARD];
+  if (cd) { paramsHistorial.push(cd); sqlHistorial += ` AND cd = $${paramsHistorial.length}`; }
+  sqlHistorial += ' ORDER BY cargo, turno, vigente_desde ASC';
+  const { rows: historial } = await pool.query(sqlHistorial, paramsHistorial);
   const historialPorGrupo = new Map(); // `${cargo}|${turno}` -> [{vigente_desde, vigente_hasta, cantidad_requerida}]
   for (const r of historial) {
     const clave = `${r.cargo}|${r.turno}`;
@@ -567,14 +581,14 @@ async function calcularPresentismoHistorico(pool, filtros) {
   const { rows: asignaciones } = await pool.query('SELECT rut, jefe_turno FROM jefe_turno_asignacion');
   const jefeTurnoPorRut = new Map(asignaciones.map(a => [a.rut, a.jefe_turno]));
   const { rows: rotacionRows } = await pool.query(
-    'SELECT DISTINCT sem, jefe_turno, rotacion_base FROM rotacion_turnos WHERE rotacion_base IS NOT NULL'
+    'SELECT sem, jefe_turno, rotacion_base, hora_entrada FROM rotacion_turnos'
   );
-  const rotacionBasePorClave = new Map(rotacionRows.map(r => [`${r.sem}|${r.jefe_turno}`, r.rotacion_base]));
+  const rotacionBasePorClave = construirRotacionBasePorClave(rotacionRows);
 
-  const { rows: empleados } = await pool.query(
-    'SELECT rut, cargo FROM empleados WHERE activo = true AND cargo = ANY($1::text[])',
-    [CARGOS_DASHBOARD]
-  );
+  let sqlEmpleados = 'SELECT rut, cargo FROM empleados WHERE activo = true AND cargo = ANY($1::text[])';
+  const paramsEmpleados = [CARGOS_DASHBOARD];
+  if (cd) { paramsEmpleados.push(cd); sqlEmpleados += ` AND cd = $${paramsEmpleados.length}`; }
+  const { rows: empleados } = await pool.query(sqlEmpleados, paramsEmpleados);
   const cargoPorRut = new Map(empleados.map(e => [e.rut, e.cargo]));
   const rutsRelevantes = [...cargoPorRut.keys()];
 
@@ -651,7 +665,7 @@ async function calcularPresentismoHistorico(pool, filtros) {
     }
   }
 
-  return { cargos: CARGOS_DASHBOARD, meses, jefes_turno: filtraJefes ? jefesTurno : ['Todos'], resultado };
+  return { cargos: CARGOS_DASHBOARD, meses, jefes_turno: filtraJefes ? jefesTurno : ['Todos'], cd: cd || 'Todos', resultado };
 }
 
 module.exports = {

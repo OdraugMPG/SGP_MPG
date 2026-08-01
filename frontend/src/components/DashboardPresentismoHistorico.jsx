@@ -35,7 +35,7 @@ const OPCIONES_JEFE_TURNO = [
   { value: 'CG', label: 'Plano (CG)' },
 ];
 
-export default function DashboardPresentismoHistorico() {
+export default function DashboardPresentismoHistorico({ cdGlobal }) {
   const [mesInicial, setMesInicial] = useState(() => {
     const d = new Date();
     d.setMonth(d.getMonth() - 2);
@@ -56,14 +56,14 @@ export default function DashboardPresentismoHistorico() {
     setCargando(true);
     setError(null);
     try {
-      const res = await obtenerPresentismoHistorico(meses, jefesTurno);
+      const res = await obtenerPresentismoHistorico(meses, jefesTurno, cdGlobal || undefined);
       setDatos(res);
     } catch (err) {
       setError(err.message);
     } finally {
       setCargando(false);
     }
-  }, [mesInicial, jefesTurno]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [mesInicial, jefesTurno, cdGlobal]); // eslint-disable-line react-hooks/exhaustive-deps
 
   useEffect(() => { cargar(); }, [cargar]);
 

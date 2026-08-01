@@ -90,15 +90,16 @@ export default function PanelIndicadores({ cd }) {
           {/* Cumplimiento de dotación por cargo */}
           <h3 style={{ marginTop: 24, marginBottom: 8, fontSize: '0.9rem' }}>Cumplimiento de dotación por cargo</h3>
           <p style={{ fontSize: '0.76rem', color: 'var(--text-muted)', marginTop: 0, marginBottom: 8 }}>
-            Requerido y Presentes son totales del período (persona-días acumulados).
+            Requerido y Presentes son totales del período (persona-días acumulados), específicos de cada CD.
           </p>
           <div className="table-scroll" style={{ maxHeight: '30vh' }}>
             <table>
-              <thead><tr><th>Cargo</th><th>Requerido (total)</th><th>Presentes (total)</th><th>Promedio/día</th><th>Cumplimiento</th></tr></thead>
+              <thead><tr><th>Cargo</th><th>CD</th><th>Requerido (total)</th><th>Presentes (total)</th><th>Promedio/día</th><th>Cumplimiento</th></tr></thead>
               <tbody>
                 {datos.cumplimiento_dotacion.detalle.map(d => (
-                  <tr key={d.cargo}>
+                  <tr key={`${d.cargo}|${d.cd}`}>
                     <td style={{ fontFamily: 'var(--font-sans)' }}>{d.cargo}</td>
+                    <td style={{ fontFamily: 'var(--font-sans)' }}>{d.cd}</td>
                     <td>{d.requerido}</td>
                     <td>{d.presentes}</td>
                     <td>{d.promedio_presente}</td>
@@ -112,7 +113,7 @@ export default function PanelIndicadores({ cd }) {
                   </tr>
                 ))}
                 {datos.cumplimiento_dotacion.detalle.length === 0 && (
-                  <tr><td colSpan={5} className="empty-state">Aún no hay requerimiento de dotación registrado.</td></tr>
+                  <tr><td colSpan={6} className="empty-state">Aún no hay requerimiento de dotación registrado.</td></tr>
                 )}
               </tbody>
             </table>
@@ -152,15 +153,16 @@ export default function PanelIndicadores({ cd }) {
           {/* Brecha de recursos: contratados vs requerido actual */}
           <h3 style={{ marginTop: 24, marginBottom: 8, fontSize: '0.9rem' }}>Recursos necesarios para cubrir la dotación</h3>
           <p style={{ fontSize: '0.76rem', color: 'var(--text-muted)', marginTop: 0, marginBottom: 8 }}>
-            Requerido vigente hoy vs. trabajadores activos contratados, por cargo — cuántos faltan por contratar (o sobran).
+            Requerido vigente hoy vs. trabajadores activos contratados, por cargo y CD — cuántos faltan por contratar (o sobran).
           </p>
           <div className="table-scroll" style={{ maxHeight: '30vh' }}>
             <table>
-              <thead><tr><th>Cargo</th><th>Requerido (actual)</th><th>Contratados</th><th>Brecha</th></tr></thead>
+              <thead><tr><th>Cargo</th><th>CD</th><th>Requerido (actual)</th><th>Contratados</th><th>Brecha</th></tr></thead>
               <tbody>
                 {(datos.brecha_recursos || []).map(d => (
-                  <tr key={d.cargo}>
+                  <tr key={`${d.cargo}|${d.cd}`}>
                     <td style={{ fontFamily: 'var(--font-sans)' }}>{d.cargo}</td>
+                    <td style={{ fontFamily: 'var(--font-sans)' }}>{d.cd}</td>
                     <td>{d.requerido_actual}</td>
                     <td>{d.contratados}</td>
                     <td>
@@ -175,7 +177,7 @@ export default function PanelIndicadores({ cd }) {
                   </tr>
                 ))}
                 {(!datos.brecha_recursos || datos.brecha_recursos.length === 0) && (
-                  <tr><td colSpan={4} className="empty-state">Sin datos de requerimiento o dotación configurados.</td></tr>
+                  <tr><td colSpan={5} className="empty-state">Sin datos de requerimiento o dotación configurados.</td></tr>
                 )}
               </tbody>
             </table>

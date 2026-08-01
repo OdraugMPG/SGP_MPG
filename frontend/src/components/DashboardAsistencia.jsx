@@ -81,8 +81,8 @@ export default function DashboardAsistencia({ cdGlobal }) {
   return (
     <>
       <PanelIndicadores cd={cdGlobal} />
-      <GraficoCumplimientoCargo />
-      <DashboardPresentismoHistorico />
+      <GraficoCumplimientoCargo cdGlobal={cdGlobal} />
+      <DashboardPresentismoHistorico cdGlobal={cdGlobal} />
       <div className="card">
       <h2>Dashboard de asistencia</h2>
       <p className="card-desc">
