@@ -2,7 +2,7 @@ import { useState, useEffect, useCallback } from 'react';
 import {
   buscarEmpleados, crearEmpleado, actualizarEmpleado,
   listarAreas, crearArea, eliminarArea, listarCargos, activarEmpleadosMasivo, actualizarAreasMasivo,
-  actualizarJefeTurnoMasivo, listarMapeoCdSucursal, guardarMapeoCdSucursal, eliminarMapeoCdSucursal, recalcularCd,
+  actualizarJefeTurnoMasivo, actualizarDireccionMasivo, listarMapeoCdSucursal, guardarMapeoCdSucursal, eliminarMapeoCdSucursal, recalcularCd,
   listarSucursalesSinMapear,
 } from '../api';
 
@@ -203,6 +203,58 @@ function PanelActualizacionJefeTurno() {
   );
 }
 
+function PanelActualizacionDireccion() {
+  const [file, setFile] = useState(null);
+  const [cargando, setCargando] = useState(false);
+  const [error, setError] = useState(null);
+  const [resultado, setResultado] = useState(null);
+
+  async function procesar() {
+    if (!file) return;
+    setCargando(true);
+    setError(null);
+    setResultado(null);
+    try {
+      const data = await actualizarDireccionMasivo(file);
+      setResultado(data);
+      setFile(null);
+    } catch (err) {
+      setError(err.message);
+    } finally {
+      setCargando(false);
+    }
+  }
+
+  return (
+    <div className="card" style={{ marginBottom: 20 }}>
+      <h2>Actualizar Dirección / Comuna (masivo)</h2>
+      <p className="card-desc">
+        Sube un archivo con columnas <strong>RUT</strong>, <strong>Comuna</strong> y{' '}
+        <strong>Direccion</strong> — se usa para completar los datos necesarios en las cartas de
+        amonestación. Solo actualiza esos 2 campos, no toca nada más del trabajador; si un
+        trabajador ya tenía dato registrado, se reemplaza por el del archivo.
+      </p>
+      <div style={{ display: 'flex', gap: 10, alignItems: 'center', flexWrap: 'wrap' }}>
+        <input
+          type="file" accept=".xlsx,.xlsm,.xls"
+          className={`file-input ${file ? 'filled' : ''}`}
+          style={{ maxWidth: 320 }}
+          onChange={e => { setFile(e.target.files[0] || null); setResultado(null); setError(null); }}
+        />
+        <button className="btn" type="button" disabled={!file || cargando} onClick={procesar}>
+          {cargando ? 'Procesando…' : 'Actualizar Direcciones'}
+        </button>
+      </div>
+      {error && <p className="status-msg error" style={{ marginTop: 10 }}>{error}</p>}
+      {resultado && (
+        <p className="status-msg ok" style={{ marginTop: 10 }}>
+          ✓ {resultado.filas_en_archivo} filas en el archivo · {resultado.actualizados} trabajadores actualizados
+        </p>
+      )}
+    </div>
+  );
+}
+
 function PanelActualizacionAreas({ onCambio }) {
   const [file, setFile] = useState(null);
   const [cargando, setCargando] = useState(false);
@@ -307,8 +359,15 @@ function PanelActivacionMasiva() {
 }
 
 function estadoActualDeEmpleado(empleado) {
-  if (empleado.motivo_termino === 'R' || empleado.motivo_termino === 'Des') return empleado.motivo_termino;
+  if (empleado.motivo_termino === 'R' || empleado.motivo_termino === 'Des' || empleado.motivo_termino === 'CcTo') return empleado.motivo_termino;
   return empleado.activo === false ? 'inactivo_legado' : 'activo';
+}
+
+function etiquetaMotivoTermino(motivo) {
+  if (motivo === 'R') return 'Renuncia';
+  if (motivo === 'Des') return 'Desvinculación';
+  if (motivo === 'CcTo') return 'Culminación de Contrato';
+  return motivo;
 }
 
 function FormularioEdicion({ empleado, areas, cargos, onGuardado, onCancelar }) {
@@ -322,6 +381,8 @@ function FormularioEdicion({ empleado, areas, cargos, onGuardado, onCancelar }) 
     fecha_termino: empleado.fecha_termino || hoyISO(),
     motivo_inactivo: empleado.motivo_inactivo || '',
     tipo_contrato: empleado.tipo_contrato_efectivo || empleado.tipo_contrato || 'OUT',
+    direccion: empleado.direccion || '',
+    comuna: empleado.comuna || '',
   });
   const [guardando, setGuardando] = useState(false);
   const [error, setError] = useState(null);
@@ -329,7 +390,7 @@ function FormularioEdicion({ empleado, areas, cargos, onGuardado, onCancelar }) 
   const [confirmarDesafuero, setConfirmarDesafuero] = useState(false);
 
   async function guardar() {
-    if ((form.estado === 'R' || form.estado === 'Des') && !form.fecha_termino) {
+    if ((form.estado === 'R' || form.estado === 'Des' || form.estado === 'CcTo') && !form.fecha_termino) {
       setError('Debes indicar la fecha de renuncia/desvinculación.');
       return;
     }
@@ -390,6 +451,16 @@ function FormularioEdicion({ empleado, areas, cargos, onGuardado, onCancelar }) 
             </select>
           </div>
           <div className="field">
+            <label>Dirección (para cartas de amonestación)</label>
+            <input type="text" value={form.direccion} onChange={e => setForm(f => ({ ...f, direccion: e.target.value }))}
+              style={{ width: '100%', background: 'var(--surface)', border: '1px solid var(--border)', borderRadius: 6, padding: '7px 9px', color: 'var(--text)' }} />
+          </div>
+          <div className="field">
+            <label>Comuna</label>
+            <input type="text" value={form.comuna} onChange={e => setForm(f => ({ ...f, comuna: e.target.value }))}
+              style={{ width: '100%', background: 'var(--surface)', border: '1px solid var(--border)', borderRadius: 6, padding: '7px 9px', color: 'var(--text)' }} />
+          </div>
+          <div className="field">
             <label>Estado</label>
             <select
               value={form.estado}
@@ -399,12 +470,13 @@ function FormularioEdicion({ empleado, areas, cargos, onGuardado, onCancelar }) 
               <option value="activo">Activo</option>
               <option value="R">Renuncia Voluntaria</option>
               <option value="Des">Desvinculación (Art. 161 — Necesidades de la Empresa)</option>
+              <option value="CcTo">Culminación de Contrato</option>
               {form.estado === 'inactivo_legado' && <option value="inactivo_legado">Inactivo (registro anterior, sin motivo estructurado)</option>}
             </select>
           </div>
-          {(form.estado === 'R' || form.estado === 'Des') && (
+          {(form.estado === 'R' || form.estado === 'Des' || form.estado === 'CcTo') && (
             <div className="field">
-              <label>Fecha de {form.estado === 'R' ? 'renuncia' : 'desvinculación'}</label>
+              <label>Fecha de {form.estado === 'R' ? 'renuncia' : form.estado === 'Des' ? 'desvinculación' : 'culminación de contrato'}</label>
               <input
                 type="date" value={form.fecha_termino}
                 onChange={e => setForm(f => ({ ...f, fecha_termino: e.target.value }))}
@@ -412,7 +484,7 @@ function FormularioEdicion({ empleado, areas, cargos, onGuardado, onCancelar }) 
               />
             </div>
           )}
-          {(form.estado === 'R' || form.estado === 'Des') && (
+          {(form.estado === 'R' || form.estado === 'Des' || form.estado === 'CcTo') && (
             <div className="field">
               <label>Observación (opcional)</label>
               <input
@@ -424,7 +496,7 @@ function FormularioEdicion({ empleado, areas, cargos, onGuardado, onCancelar }) 
             </div>
           )}
         </div>
-        {(form.estado === 'R' || form.estado === 'Des') && (
+        {(form.estado === 'R' || form.estado === 'Des' || form.estado === 'CcTo') && (
           <p style={{ fontSize: '0.78rem', color: 'var(--text-muted)', marginTop: -6, marginBottom: 12 }}>
             Queda <strong>activo</strong> hasta fin de este mes (para no perder su procesamiento de
             asistencia), y pasa a inactivo automáticamente a partir del mes siguiente a la fecha
@@ -642,6 +714,7 @@ export default function PerfilTrabajador({ cdGlobal }) {
       <PanelMapeoCd />
       <PanelActualizacionAreas onCambio={cargarAreas} />
       <PanelActualizacionJefeTurno />
+      <PanelActualizacionDireccion />
       <PanelAreas areas={areas} onCambio={cargarAreas} />
 
       {mostrarCreacion && (
@@ -706,11 +779,11 @@ export default function PerfilTrabajador({ cdGlobal }) {
                       <td>
                         {emp.activo === false ? (
                           <span className="badge badge-danger" title={emp.motivo_inactivo || ''}>
-                            Inactivo {emp.motivo_termino === 'R' ? '(Renuncia)' : emp.motivo_termino === 'Des' ? '(Desvinculación)' : ''}
+                            Inactivo {emp.motivo_termino ? `(${etiquetaMotivoTermino(emp.motivo_termino)})` : ''}
                           </span>
-                        ) : (emp.motivo_termino === 'R' || emp.motivo_termino === 'Des') ? (
+                        ) : (emp.motivo_termino === 'R' || emp.motivo_termino === 'Des' || emp.motivo_termino === 'CcTo') ? (
                           <span className="badge badge-warn" title={`Pasa a inactivo el mes siguiente a ${emp.fecha_termino}`}>
-                            Activo — {emp.motivo_termino === 'R' ? 'Renuncia' : 'Desvinculación'} {emp.fecha_termino}
+                            Activo — {etiquetaMotivoTermino(emp.motivo_termino)} {emp.fecha_termino}
                           </span>
                         ) : (
                           <span className="badge badge-ok">Activo</span>

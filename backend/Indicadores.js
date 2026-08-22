@@ -22,10 +22,17 @@ function etiquetaTurno(tipoTurno) {
 
 // Indica si, para un TIPO de turno (no una persona en particular), esa fecha
 // es día de descanso: Noche y Plano libran Sábado y Domingo; AM/PM (Rotativo)
-// libra solo Domingo. Se usa para no exigir dotación en un turno que ese día
-// nadie debería estar trabajando — de lo contrario, el requerido baja el
-// promedio de cumplimiento sin que haya ninguna falta real.
-function esDiaLibreTipoTurno(tipoTurno, fecha) {
+// libra solo Domingo. También considera feriados: cualquier feriado cuenta
+// como día libre para todos los turnos (igual que un domingo), y el turno
+// Noche además descansa el día PREVIO a cada feriado. Se usa para no exigir
+// dotación en un turno que ese día nadie debería estar trabajando — de lo
+// contrario, el requerido baja el promedio de cumplimiento sin que haya
+// ninguna falta real.
+function esDiaLibreTipoTurno(tipoTurno, fecha, feriadosSet) {
+  if (feriadosSet) {
+    if (feriadosSet.has(fecha)) return true;
+    if (tipoTurno === 'NOCHE' && feriadosSet.has(sumarDias(fecha, 1))) return true;
+  }
   const dow = new Date(fecha + 'T00:00:00').getDay(); // 0=Dom ... 6=Sáb
   if (tipoTurno === 'NOCHE' || tipoTurno === 'PLANO') return dow === 0 || dow === 6;
   if (tipoTurno === 'AM' || tipoTurno === 'PM') return dow === 0;
@@ -134,6 +141,9 @@ function valorVigenteEnFecha(registros, fecha) {
 
 async function calcularIndicadores(pool, filtros) {
   const { desde, hasta, area, cds } = filtros; // cds: null (todos) o arreglo de CDs permitidos/solicitados
+
+  const { rows: feriadosRows } = await pool.query('SELECT fecha FROM feriados');
+  const feriadosSet = new Set(feriadosRows.map(r => r.fecha));
 
   // --- Universo de trabajadores activos (filtrado por área y/o CD si corresponde) ---
   let sqlEmp = 'SELECT rut, nombre, apellido_paterno, cargo, centro_costo, cd FROM empleados WHERE activo = true';
@@ -305,7 +315,7 @@ async function calcularIndicadores(pool, filtros) {
       for (const clave of historialReqPorGrupo.keys()) {
         const [c, t, cdClave] = clave.split('|');
         if (c !== cargo || cdClave !== cd) continue;
-        if (esDiaLibreTipoTurno(t, fecha)) continue;
+        if (esDiaLibreTipoTurno(t, fecha, feriadosSet)) continue;
         requeridoDia += requeridoVigenteCargoTurnoCd(cargo, t, cd, fecha);
       }
       const presenteDia = presentesPorCargoCdDia.get(`${fecha}|${claveCargoCd}`)?.size || 0;
@@ -450,6 +460,9 @@ async function exportarReporteDesvinculacionXlsx(pool, filtros) {
 async function calcularSerieCumplimiento(pool, filtros) {
   const { desde, hasta, cargo, jefesTurno, cds } = filtros; // cds: null (todos) o arreglo de CDs permitidos/solicitados
 
+  const { rows: feriadosRows } = await pool.query('SELECT fecha FROM feriados');
+  const feriadosSet = new Set(feriadosRows.map(r => r.fecha));
+
   const dIni = new Date(desde + 'T00:00:00');
   const dFin = new Date(hasta + 'T00:00:00');
   const diasTotales = Math.round((dFin - dIni) / 86400000) + 1;
@@ -477,7 +490,7 @@ async function calcularSerieCumplimiento(pool, filtros) {
   }
 
   function requeridoDeTipoEn(tipoTurno, fecha) {
-    if (esDiaLibreTipoTurno(tipoTurno, fecha)) return 0;
+    if (esDiaLibreTipoTurno(tipoTurno, fecha, feriadosSet)) return 0;
     let total = 0;
     for (const [clave, registros] of historialPorGrupo) {
       const [, t] = clave.split('|');
@@ -492,7 +505,7 @@ async function calcularSerieCumplimiento(pool, filtros) {
     let total = 0;
     for (const [clave, registros] of historialPorGrupo) {
       const [, t] = clave.split('|');
-      if (esDiaLibreTipoTurno(t, fecha)) continue;
+      if (esDiaLibreTipoTurno(t, fecha, feriadosSet)) continue;
       const vigente = valorVigenteEnFecha(registros, fecha);
       if (vigente !== null) total += vigente;
     }
@@ -560,6 +573,9 @@ async function calcularPresentismoHistorico(pool, filtros) {
   const { meses, jefesTurno, cd } = filtros; // jefesTurno: array de códigos (opcional); cd: string (opcional)
   if (!Array.isArray(meses) || meses.length === 0) throw new Error('Debes indicar al menos un mes');
   const filtraJefes = Array.isArray(jefesTurno) && jefesTurno.length > 0;
+
+  const { rows: feriadosRows } = await pool.query('SELECT fecha FROM feriados');
+  const feriadosSet = new Set(feriadosRows.map(r => r.fecha));
 
   let sqlHistorial = `SELECT cargo, turno, vigente_desde, vigente_hasta, cantidad_requerida FROM requerimiento_dotacion
      WHERE cargo = ANY($1::text[])`;
@@ -636,14 +652,14 @@ async function calcularPresentismoHistorico(pool, filtros) {
             if (t) tipos.add(t);
           }
           for (const t of tipos) {
-            if (esDiaLibreTipoTurno(t, fecha)) continue;
+            if (esDiaLibreTipoTurno(t, fecha, feriadosSet)) continue;
             requeridoDia += requeridoVigenteEn(cargo, t, fecha);
           }
         } else {
           for (const clave of historialPorGrupo.keys()) {
             const [c, t] = clave.split('|');
             if (c !== cargo) continue;
-            if (esDiaLibreTipoTurno(t, fecha)) continue;
+            if (esDiaLibreTipoTurno(t, fecha, feriadosSet)) continue;
             requeridoDia += requeridoVigenteEn(cargo, t, fecha);
           }
         }

@@ -3,6 +3,8 @@ import { obtenerDashboardAsistencia, listarAreas, urlDescargaDashboardAsistencia
 import PanelIndicadores from './PanelIndicadores';
 import GraficoCumplimientoCargo from './GraficoCumplimientoCargo';
 import DashboardPresentismoHistorico from './DashboardPresentismoHistorico';
+import AnalisisAusentismo from './AnalisisAusentismo';
+import AnalisisMarcasAbiertas from './AnalisisMarcasAbiertas';
 
 const DIAS_SEMANA = ['dom', 'lun', 'mar', 'mié', 'jue', 'vie', 'sáb'];
 
@@ -38,6 +40,7 @@ const CLASE_POR_CATEGORIA = {
   futuro: 'matriz-futuro',
   diaLibre: 'matriz-diaLibre',
   diaLibreTrabajado: 'matriz-diaLibreTrabajado',
+  termino: 'matriz-termino',
 };
 
 export default function DashboardAsistencia({ cdGlobal }) {
@@ -83,6 +86,8 @@ export default function DashboardAsistencia({ cdGlobal }) {
       <PanelIndicadores cd={cdGlobal} />
       <GraficoCumplimientoCargo cdGlobal={cdGlobal} />
       <DashboardPresentismoHistorico cdGlobal={cdGlobal} />
+      <AnalisisAusentismo cdGlobal={cdGlobal} />
+      <AnalisisMarcasAbiertas cdGlobal={cdGlobal} />
       <div className="card">
       <h2>Dashboard de asistencia</h2>
       <p className="card-desc">
@@ -130,7 +135,12 @@ export default function DashboardAsistencia({ cdGlobal }) {
         <span className="badge matriz-ausencia" style={{ padding: '3px 10px' }}>Ausencia / permiso asignado</span>
         <span className="badge matriz-diaLibre" style={{ padding: '3px 10px' }}>DL — Día Libre</span>
         <span className="badge matriz-diaLibreTrabajado" style={{ padding: '3px 10px' }}>DLT — Día Libre Trabajado</span>
+        <span className="badge matriz-diaLibre" style={{ padding: '3px 10px' }}>DFNL — Día Feriado No Laborado</span>
+        <span className="badge matriz-diaLibreTrabajado" style={{ padding: '3px 10px' }}>DFT — Día Feriado Trabajado</span>
         <span className="badge matriz-ausente" style={{ padding: '3px 10px' }}>A — Sin ninguna marca</span>
+        <span className="badge matriz-termino" style={{ padding: '3px 10px' }}>Rnv — Renuncia Voluntaria</span>
+        <span className="badge matriz-termino" style={{ padding: '3px 10px' }}>Dsv — Desvinculado</span>
+        <span className="badge matriz-termino" style={{ padding: '3px 10px' }}>CcTo — Culminación de Contrato</span>
       </div>
 
       {error && <p className="status-msg error">{error}</p>}

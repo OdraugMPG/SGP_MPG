@@ -240,6 +240,7 @@ async function generarDetalleMarcaciones(pool, filtros, limite = 1000) {
       rut: rutFila,
       nombre: emp ? `${emp.nombre} ${emp.apellido_paterno || ''}`.trim() : null,
       turno: turnoLabel,
+      jefe_turno: codigoAsignado || null,
       cargo: emp?.cargo || '',
       tipo_contrato: tipoContrato,
       entrada_mpg: entradaTalana,

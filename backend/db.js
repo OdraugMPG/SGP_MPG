@@ -109,6 +109,47 @@ async function initDb() {
     );
     CREATE INDEX IF NOT EXISTS idx_fuero_maternal_rut ON fuero_maternal(rut);
 
+    -- Calendario de feriados de Chile, usado para no exigir dotación en
+    -- Indicadores/Dashboard en un feriado (igual que un domingo), y para que
+    -- el turno Noche descanse el día previo al feriado.
+    CREATE TABLE IF NOT EXISTS feriados (
+      fecha TEXT PRIMARY KEY,
+      nombre TEXT NOT NULL,
+      irrenunciable BOOLEAN DEFAULT false,
+      creado_por TEXT,
+      creado_en TIMESTAMP DEFAULT now()
+    );
+
+    -- Cartas de amonestación: se guarda tanto el detalle del causal como el
+    -- PDF ya generado (como bytea, para que quede disponible en la ficha del
+    -- trabajador sin depender del sistema de archivos del servidor, que no
+    -- es persistente entre despliegues).
+    CREATE TABLE IF NOT EXISTS amonestaciones (
+      id SERIAL PRIMARY KEY,
+      rut TEXT NOT NULL,
+      fecha TEXT NOT NULL,
+      motivo TEXT,
+      causal TEXT NOT NULL,
+      direccion TEXT,
+      comuna TEXT,
+      pdf_contenido BYTEA,
+      docx_contenido BYTEA,
+      generado_por TEXT,
+      creado_en TIMESTAMP DEFAULT now()
+    );
+    CREATE INDEX IF NOT EXISTS idx_amonestaciones_rut ON amonestaciones(rut);
+
+    -- Catálogo reutilizable de Motivo -> Causal, para no redactar el mismo
+    -- texto cada vez en casos que se repiten (ej: atrasos reiterados).
+    CREATE TABLE IF NOT EXISTS motivos_amonestacion (
+      id SERIAL PRIMARY KEY,
+      motivo TEXT NOT NULL UNIQUE,
+      causal TEXT NOT NULL,
+      autocompletar_atrasos BOOLEAN DEFAULT false,
+      creado_por TEXT,
+      creado_en TIMESTAMP DEFAULT now()
+    );
+
     CREATE TABLE IF NOT EXISTS contrato_rut (
       rut TEXT PRIMARY KEY,
       razon_social TEXT
@@ -255,6 +296,11 @@ async function initDb() {
   await pool.query("ALTER TABLE empleados ADD COLUMN IF NOT EXISTS motivo_termino TEXT"); // 'R' (Renuncia Voluntaria) o 'Des' (Desvinculación Art. 161)
   await pool.query('ALTER TABLE empleados ADD COLUMN IF NOT EXISTS fecha_termino TEXT');
   await pool.query('ALTER TABLE empleados ADD COLUMN IF NOT EXISTS tipo_contrato TEXT');
+  await pool.query('ALTER TABLE empleados ADD COLUMN IF NOT EXISTS direccion TEXT');
+  await pool.query('ALTER TABLE empleados ADD COLUMN IF NOT EXISTS comuna TEXT');
+  await pool.query('ALTER TABLE amonestaciones ADD COLUMN IF NOT EXISTS motivo TEXT');
+  await pool.query('ALTER TABLE amonestaciones ADD COLUMN IF NOT EXISTS docx_contenido BYTEA');
+  await pool.query('ALTER TABLE motivos_amonestacion ADD COLUMN IF NOT EXISTS autocompletar_atrasos BOOLEAN DEFAULT false');
   await pool.query('ALTER TABLE requerimiento_dotacion ADD COLUMN IF NOT EXISTS turno TEXT');
   await pool.query('ALTER TABLE requerimiento_dotacion ADD COLUMN IF NOT EXISTS vigente_hasta TEXT');
   await pool.query('ALTER TABLE requerimiento_dotacion ADD COLUMN IF NOT EXISTS cd TEXT');
@@ -289,17 +335,17 @@ async function initDb() {
   // libremente desde "Usuarios" — incluyendo crear roles nuevos.
   const TODOS_LOS_MODULOS = [
     'dashboard', 'resultados', 'detalle', 'reporte', 'nomina', 'horasExtras', 'asignacion', 'perfiles',
-    'requerimiento', 'ausencias', 'actualizacion', 'carga', 'usuarios', 'fueroMaternal',
+    'requerimiento', 'ausencias', 'actualizacion', 'carga', 'usuarios', 'fueroMaternal', 'amonestaciones', 'feriados',
   ];
   const rolesIniciales = [
     { nombre: 'admin', modulos: TODOS_LOS_MODULOS, es_sistema: true },
     { nombre: 'usuario', modulos: ['dashboard', 'resultados'], es_sistema: true },
     { nombre: 'Gerente', modulos: ['dashboard', 'resultados', 'detalle', 'reporte'], es_sistema: false },
-    { nombre: 'Jefe Operaciones', modulos: ['dashboard', 'resultados', 'detalle', 'reporte', 'asignacion', 'requerimiento', 'ausencias'], es_sistema: false },
+    { nombre: 'Jefe Operaciones', modulos: ['dashboard', 'resultados', 'detalle', 'reporte', 'asignacion', 'requerimiento', 'ausencias', 'feriados'], es_sistema: false },
     { nombre: 'Jefe Turno', modulos: ['dashboard', 'resultados', 'reporte', 'asignacion', 'ausencias'], es_sistema: false },
     { nombre: 'Supervisor', modulos: ['resultados', 'reporte', 'ausencias', 'actualizacion'], es_sistema: false },
     { nombre: 'KAM', modulos: ['dashboard', 'reporte'], es_sistema: false },
-    { nombre: 'RRHH', modulos: ['dashboard', 'resultados', 'perfiles', 'ausencias', 'requerimiento', 'nomina', 'fueroMaternal'], es_sistema: false },
+    { nombre: 'RRHH', modulos: ['dashboard', 'resultados', 'perfiles', 'ausencias', 'requerimiento', 'nomina', 'fueroMaternal', 'amonestaciones'], es_sistema: false },
   ];
   for (const r of rolesIniciales) {
     await pool.query(

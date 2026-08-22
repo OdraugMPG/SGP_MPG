@@ -654,11 +654,56 @@ async function actualizarJefeTurnoDesdeArchivo(pool, path) {
   }
 }
 
+// Carga masiva de Dirección/Comuna desde un Excel (columnas: RUT, Comuna,
+// Direccion) — usado para completar los datos necesarios en las cartas de
+// amonestación. Solo actualiza esos 2 campos, no toca nada más del trabajador.
+async function actualizarDireccionDesdeArchivo(pool, path) {
+  const wb = leerHojas(path);
+  const ws = wb.Sheets[wb.SheetNames[0]];
+  const rows = XLSX.utils.sheet_to_json(ws, { defval: null });
+
+  const pares = rows
+    .map(r => {
+      const rutRaw = r['RUT'] ?? r['Rut'] ?? r['rut'] ?? Object.values(r)[0];
+      const comunaRaw = r['Comuna'] ?? r['COMUNA'] ?? r['comuna'] ?? Object.values(r)[1];
+      const direccionRaw = r['Direccion'] ?? r['Dirección'] ?? r['DIRECCION'] ?? r['direccion'] ?? Object.values(r)[2];
+      return {
+        rut: limpiarRut(rutRaw),
+        comuna: comunaRaw ? comunaRaw.toString().trim() : null,
+        direccion: direccionRaw ? direccionRaw.toString().trim() : null,
+      };
+    })
+    .filter(p => p.rut && (p.comuna || p.direccion));
+
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+    let actualizados = 0;
+    for (const p of pares) {
+      const { rowCount } = await client.query(
+        `UPDATE empleados SET
+           comuna = COALESCE($1, comuna),
+           direccion = COALESCE($2, direccion)
+         WHERE rut = $3`,
+        [p.comuna, p.direccion, p.rut]
+      );
+      actualizados += rowCount;
+    }
+    await client.query('COMMIT');
+    return { filas_en_archivo: pares.length, actualizados };
+  } catch (err) {
+    await client.query('ROLLBACK');
+    throw err;
+  } finally {
+    client.release();
+  }
+}
+
 module.exports = {
   parseTalana, parseCencosud, parseMaestro, parseRotacion, parseAsignacion,
   cargarTodo, cargarTalanaIncremental, cargarCencosudIncremental,
   diaDeSemana, semanaISO, resolverJefeTurno, toFechaISO, toHoraStr,
   contratoDesdeRazonSocial, sumarDias, fusionarTurnosNocturnos, limpiarRut,
-  activarEmpleadosDesdeArchivo, actualizarAreasDesdeArchivo, actualizarJefeTurnoDesdeArchivo,
+  activarEmpleadosDesdeArchivo, actualizarAreasDesdeArchivo, actualizarJefeTurnoDesdeArchivo, actualizarDireccionDesdeArchivo,
   determinarTipoTurno, minutosAjusteColacion, actualizarCdDesdeMarcaciones, construirRotacionBasePorClave, tipoTurnoDesdeHoraEntrada,
 };

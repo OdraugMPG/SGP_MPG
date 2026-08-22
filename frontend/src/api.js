@@ -152,6 +152,21 @@ export function urlDescargaReporteDiario(fecha, excluirAreas = [], cd) {
   return `${API_URL}/api/reporte-diario/export?${params.toString()}`;
 }
 
+export async function obtenerReporteAtrasos(desde, hasta, cd) {
+  const params = new URLSearchParams({ desde, hasta });
+  if (cd) params.append('cd', cd);
+  const res = await authFetch(`${API_URL}/api/reporte-diario/atrasos?${params.toString()}`);
+  const data = await res.json();
+  if (!res.ok) throw new Error(data.error || 'Error al calcular el reporte de atrasos');
+  return data;
+}
+
+export function urlDescargaReporteAtrasos(desde, hasta, cd) {
+  const params = new URLSearchParams({ desde, hasta, token: obtenerToken() || '' });
+  if (cd) params.append('cd', cd);
+  return `${API_URL}/api/reporte-diario/atrasos/export?${params.toString()}`;
+}
+
 export function urlDescargaReporteEmpleadoPDF(rut, mes) {
   const params = new URLSearchParams({ mes, token: obtenerToken() || '' });
   return `${API_URL}/api/reporte-empleado/${encodeURIComponent(rut)}/pdf?${params.toString()}`;
@@ -805,6 +820,18 @@ export async function actualizarJefeTurnoMasivo(file) {
   return data;
 }
 
+export async function actualizarDireccionMasivo(file) {
+  const formData = new FormData();
+  formData.append('direccion', file);
+  const res = await authFetch(`${API_URL}/api/empleados/direccion-masivo`, {
+    method: 'POST',
+    body: formData,
+  });
+  const data = await res.json();
+  if (!res.ok || !data.ok) throw new Error(data.error || 'Error al actualizar direcciones y comunas');
+  return data;
+}
+
 export async function listarParentescosFallecimiento() {
   const res = await authFetch(`${API_URL}/api/ausencias/fallecimiento/parentescos`);
   if (!res.ok) throw new Error('Error al listar parentescos');
@@ -867,6 +894,144 @@ export async function crearFueroMaternal(datos) {
   });
   const data = await res.json();
   if (!res.ok || !data.ok) throw new Error(data.error || 'Error al registrar el fuero maternal');
+  return data;
+}
+
+export async function listarMotivosAmonestacion() {
+  const res = await authFetch(`${API_URL}/api/motivos-amonestacion`);
+  const data = await res.json();
+  if (!res.ok) throw new Error(data.error || 'Error al listar los motivos');
+  return data;
+}
+
+export async function crearMotivoAmonestacion(datos) {
+  const res = await authFetch(`${API_URL}/api/motivos-amonestacion`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(datos),
+  });
+  const data = await res.json();
+  if (!res.ok || !data.ok) throw new Error(data.error || 'Error al guardar el motivo');
+  return data;
+}
+
+export async function obtenerAtrasosDetalle(rut, hasta) {
+  const params = new URLSearchParams({ rut });
+  if (hasta) params.append('hasta', hasta);
+  const res = await authFetch(`${API_URL}/api/amonestaciones/atrasos-detalle?${params.toString()}`);
+  const data = await res.json();
+  if (!res.ok) throw new Error(data.error || 'Error al buscar el detalle de atrasos');
+  return data;
+}
+
+export async function eliminarMotivoAmonestacion(id) {
+  const res = await authFetch(`${API_URL}/api/motivos-amonestacion/${id}`, { method: 'DELETE' });
+  const data = await res.json();
+  if (!res.ok || !data.ok) throw new Error(data.error || 'Error al eliminar el motivo');
+  return data;
+}
+
+export async function listarAmonestaciones(rut) {
+  const params = rut ? `?rut=${encodeURIComponent(rut)}` : '';
+  const res = await authFetch(`${API_URL}/api/amonestaciones${params}`);
+  const data = await res.json();
+  if (!res.ok) throw new Error(data.error || 'Error al listar las amonestaciones');
+  return data;
+}
+
+export async function crearAmonestacion(datos) {
+  const res = await authFetch(`${API_URL}/api/amonestaciones`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(datos),
+  });
+  const data = await res.json();
+  if (!res.ok || !data.ok) throw new Error(data.error || 'Error al generar la carta de amonestación');
+  return data;
+}
+
+export function urlDescargaAmonestacion(id) {
+  return `${API_URL}/api/amonestaciones/${id}/pdf?token=${obtenerToken() || ''}`;
+}
+
+export function urlDescargaAmonestacionWord(id) {
+  return `${API_URL}/api/amonestaciones/${id}/docx?token=${obtenerToken() || ''}`;
+}
+
+export async function listarFeriados(anio) {
+  const params = anio ? `?anio=${anio}` : '';
+  const res = await authFetch(`${API_URL}/api/feriados${params}`);
+  const data = await res.json();
+  if (!res.ok) throw new Error(data.error || 'Error al listar los feriados');
+  return data;
+}
+
+export async function previsualizarFeriadosApi(anio) {
+  const res = await authFetch(`${API_URL}/api/feriados/previsualizar-api?anio=${anio}`);
+  const data = await res.json();
+  if (!res.ok) throw new Error(data.error || 'Error al consultar la API de feriados');
+  return data;
+}
+
+export async function confirmarFeriados(feriados) {
+  const res = await authFetch(`${API_URL}/api/feriados/confirmar`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ feriados }),
+  });
+  const data = await res.json();
+  if (!res.ok || !data.ok) throw new Error(data.error || 'Error al guardar los feriados');
+  return data;
+}
+
+export async function crearFeriado(datos) {
+  const res = await authFetch(`${API_URL}/api/feriados`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(datos),
+  });
+  const data = await res.json();
+  if (!res.ok || !data.ok) throw new Error(data.error || 'Error al guardar el feriado');
+  return data;
+}
+
+export async function eliminarFeriado(fecha) {
+  const res = await authFetch(`${API_URL}/api/feriados/${fecha}`, { method: 'DELETE' });
+  const data = await res.json();
+  if (!res.ok || !data.ok) throw new Error(data.error || 'Error al eliminar el feriado');
+  return data;
+}
+
+export async function obtenerAusentismoRecurrente(mesesAtras, cd) {
+  const params = new URLSearchParams();
+  if (mesesAtras) params.append('mesesAtras', mesesAtras);
+  if (cd) params.append('cd', cd);
+  const res = await authFetch(`${API_URL}/api/ausentismo-recurrente?${params.toString()}`);
+  const data = await res.json();
+  if (!res.ok) throw new Error(data.error || 'Error al calcular el análisis de ausentismo');
+  return data;
+}
+
+export async function obtenerMarcasAbiertas(desde, hasta, cd) {
+  const params = new URLSearchParams({ desde, hasta });
+  if (cd) params.append('cd', cd);
+  const res = await authFetch(`${API_URL}/api/marcas-abiertas?${params.toString()}`);
+  const data = await res.json();
+  if (!res.ok) throw new Error(data.error || 'Error al calcular el análisis de marcas abiertas');
+  return data;
+}
+
+export function urlDescargaMarcasAbiertas(desde, hasta, cd) {
+  const params = new URLSearchParams({ desde, hasta, token: obtenerToken() || '' });
+  if (cd) params.append('cd', cd);
+  return `${API_URL}/api/marcas-abiertas/export?${params.toString()}`;
+}
+
+
+export async function eliminarAmonestacion(id) {
+  const res = await authFetch(`${API_URL}/api/amonestaciones/${id}`, { method: 'DELETE' });
+  const data = await res.json();
+  if (!res.ok || !data.ok) throw new Error(data.error || 'Error al eliminar el registro');
   return data;
 }
 

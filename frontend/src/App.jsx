@@ -9,6 +9,8 @@ import AutorizacionHorasExtras from './components/AutorizacionHorasExtras';
 import AsignacionJefeTurno from './components/AsignacionJefeTurno';
 import PerfilTrabajador from './components/PerfilTrabajador';
 import FueroMaternal from './components/FueroMaternal';
+import Amonestaciones from './components/Amonestaciones';
+import Feriados from './components/Feriados';
 import AsignacionAusencias from './components/AsignacionAusencias';
 import DashboardAsistencia from './components/DashboardAsistencia';
 import DetalleMarcaciones from './components/DetalleMarcaciones';
@@ -28,6 +30,8 @@ const TODAS_LAS_PESTANAS = [
   { key: 'asignacion', label: 'Jefe de Turno' },
   { key: 'perfiles', label: 'Perfiles / Áreas' },
   { key: 'fueroMaternal', label: 'Fuero Maternal' },
+  { key: 'amonestaciones', label: 'Amonestaciones' },
+  { key: 'feriados', label: 'Feriados' },
   { key: 'requerimiento', label: 'Requerimiento Dotación' },
   { key: 'ausencias', label: 'Ausencias / Permisos' },
   { key: 'actualizacion', label: 'Actualización diaria' },
@@ -192,6 +196,16 @@ export default function App() {
             {modulosHabilitados.includes('fueroMaternal') && (
               <div style={{ display: tab === 'fueroMaternal' ? 'block' : 'none' }}>
                 <FueroMaternal />
+              </div>
+            )}
+            {modulosHabilitados.includes('amonestaciones') && (
+              <div style={{ display: tab === 'amonestaciones' ? 'block' : 'none' }}>
+                <Amonestaciones />
+              </div>
+            )}
+            {modulosHabilitados.includes('feriados') && (
+              <div style={{ display: tab === 'feriados' ? 'block' : 'none' }}>
+                <Feriados />
               </div>
             )}
             {modulosHabilitados.includes('requerimiento') && (

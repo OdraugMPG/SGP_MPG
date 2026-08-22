@@ -369,6 +369,7 @@ tbody tr:hover { background: var(--surface-2); }
 .matriz-futuro { background: transparent; color: var(--text-muted); }
 .matriz-diaLibre { background: rgba(139,150,168,0.15); color: var(--text-muted); }
 .matriz-diaLibreTrabajado { background: rgba(122,95,214,0.25); color: var(--turno-noche); }
+.matriz-termino { background: rgba(120,120,120,0.22); color: var(--text-muted); font-style: italic; }
 
 .matriz-dia-semana {
   display: block;

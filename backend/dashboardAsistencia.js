@@ -1,5 +1,10 @@
 const XLSX = require('xlsx');
-const { diaDeSemana, semanaISO, resolverJefeTurno, determinarTipoTurno, construirRotacionBasePorClave } = require('./importar');
+const { diaDeSemana, semanaISO, resolverJefeTurno, determinarTipoTurno, construirRotacionBasePorClave, sumarDias } = require('./importar');
+
+// Sigla que se muestra en el Dashboard para los días posteriores a la fecha
+// de término, mientras el trabajador sigue "activo" por procesamiento del
+// mes en curso (ver empleados.motivo_termino).
+const CODIGO_MOTIVO_TERMINO = { R: 'Rnv', Des: 'Dsv', CcTo: 'CcTo' };
 
 function etiquetaTurno(tipoTurno) {
   if (tipoTurno === 'NOCHE') return 'Noche';
@@ -23,7 +28,7 @@ async function calcularMatrizAsistencia(pool, filtros) {
     fechas.push(d.toISOString().slice(0, 10));
   }
 
-  let sqlEmp = 'SELECT rut, nombre, apellido_paterno, cargo, centro_costo, cd FROM empleados WHERE activo = true';
+  let sqlEmp = 'SELECT rut, nombre, apellido_paterno, cargo, centro_costo, cd, motivo_termino, fecha_termino FROM empleados WHERE activo = true';
   const paramsEmp = [];
   if (area) { paramsEmp.push(area); sqlEmp += ` AND centro_costo = $${paramsEmp.length}`; }
   if (cds) { paramsEmp.push(cds); sqlEmp += ` AND cd = ANY($${paramsEmp.length}::text[])`; }
@@ -50,20 +55,30 @@ async function calcularMatrizAsistencia(pool, filtros) {
   );
   const rotacionBasePorClave = construirRotacionBasePorClave(rotacionRows);
 
+  const { rows: feriadosRows } = await pool.query('SELECT fecha FROM feriados');
+  const feriadosSet = new Set(feriadosRows.map(r => r.fecha));
+
   const hoy = new Date().toISOString().slice(0, 10);
 
-  function esDiaLibre(codigoJefeTurno, fecha) {
-    if (!codigoJefeTurno) return false;
+  // Devuelve el motivo del día libre ('feriado' | 'descanso' | null) — se
+  // separa de un simple true/false para poder distinguir la sigla que
+  // corresponde: DL/DLT para descanso regular, DFNL/DFT para feriado.
+  function motivoDiaLibre(codigoJefeTurno, fecha) {
+    if (!codigoJefeTurno) return null;
+    if (feriadosSet.has(fecha)) return 'feriado';
     const dia = diaDeSemana(fecha);
     if (codigoJefeTurno === 'CG' || codigoJefeTurno === 'PLANO') {
-      return dia === 'Sáb' || dia === 'Dom';
+      return (dia === 'Sáb' || dia === 'Dom') ? 'descanso' : null;
     }
     const codigoResuelto = resolverJefeTurno(codigoJefeTurno);
     const sem = semanaISO(fecha);
     const rotacionBase = rotacionBasePorClave.get(`${sem}|${codigoResuelto}`);
-    if (rotacionBase === 'NOCHE') return dia === 'Sáb' || dia === 'Dom';
-    if (rotacionBase === 'AM' || rotacionBase === 'PM') return dia === 'Dom';
-    return false;
+    if (rotacionBase === 'NOCHE') {
+      if (feriadosSet.has(sumarDias(fecha, 1))) return 'feriado'; // Noche descansa el día previo al feriado
+      return (dia === 'Sáb' || dia === 'Dom') ? 'descanso' : null;
+    }
+    if (rotacionBase === 'AM' || rotacionBase === 'PM') return dia === 'Dom' ? 'descanso' : null;
+    return null;
   }
 
   const trabajadores = empleados.map(emp => {
@@ -78,7 +93,14 @@ async function calcularMatrizAsistencia(pool, filtros) {
       }
       const r = resultadoPorClave.get(clave);
       const tieneMarca = !!(r && (r.marco_talana || r.marco_cencosud));
-      if (esDiaLibre(codigoJefeTurno, fecha)) {
+      const motivo = motivoDiaLibre(codigoJefeTurno, fecha);
+      if (motivo === 'feriado') {
+        estados[fecha] = tieneMarca
+          ? { codigo: 'DFT', categoria: 'diaLibreTrabajado' }
+          : { codigo: 'DFNL', categoria: 'diaLibre' };
+        continue;
+      }
+      if (motivo === 'descanso') {
         estados[fecha] = tieneMarca
           ? { codigo: 'DLT', categoria: 'diaLibreTrabajado' }
           : { codigo: 'DL', categoria: 'diaLibre' };
@@ -90,6 +112,11 @@ async function calcularMatrizAsistencia(pool, filtros) {
         estados[fecha] = { codigo: 'SM_CTRL', categoria: 'inconsistencia' };
       } else if (r && !r.marco_talana && r.marco_cencosud) {
         estados[fecha] = { codigo: 'SM_TLN', categoria: 'inconsistencia' };
+      } else if (!tieneMarca && emp.motivo_termino && emp.fecha_termino && fecha >= emp.fecha_termino) {
+        // Ya renunció/fue desvinculado/culminó contrato, pero sigue "activo"
+        // hasta fin de mes (para no perder el procesamiento del mes) — no
+        // corresponde marcarlo "Ausente" en estos días, sino indicar el motivo.
+        estados[fecha] = { codigo: CODIGO_MOTIVO_TERMINO[emp.motivo_termino] || 'A', categoria: 'termino' };
       } else if (fecha < hoy) {
         estados[fecha] = { codigo: 'A', categoria: 'ausente' };
       } else {

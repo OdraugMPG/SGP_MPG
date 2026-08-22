@@ -7,12 +7,18 @@ const fs = require('fs');
 require('dotenv').config();
 
 const { initDb, procesarTransicionesTermino } = require('./db');
-const { cargarTodo, cargarTalanaIncremental, cargarCencosudIncremental, activarEmpleadosDesdeArchivo, actualizarAreasDesdeArchivo, actualizarJefeTurnoDesdeArchivo, actualizarCdDesdeMarcaciones } = require('./importar');
+const { cargarTodo, cargarTalanaIncremental, cargarCencosudIncremental, activarEmpleadosDesdeArchivo, actualizarAreasDesdeArchivo, actualizarJefeTurnoDesdeArchivo, actualizarCdDesdeMarcaciones, actualizarDireccionDesdeArchivo } = require('./importar');
 const { calcularResultados } = require('./calcular');
 const { generarReporteDiario, exportarReporteDiarioXlsx, obtenerLogMarcacion } = require('./reporteDiario');
+const { calcularReporteAtrasos, exportarReporteAtrasosXlsx } = require('./reporteAtrasos');
 const { generarReporteEmpleadoPDF, generarReportePorJefeTurnoPDF } = require('./reporteEmpleadoPDF');
 const { generarDetalleMarcaciones, exportarDetalleMarcacionesXlsx } = require('./detalleMarcaciones');
 const { calcularCierreNomina, exportarCierreNominaXlsx } = require('./cierreNomina');
+const { generarAmonestacionPDF } = require('./amonestacionPDF');
+const { generarAmonestacionDOCX } = require('./amonestacionDOCX');
+const { obtenerFeriadosDesdeApi } = require('./feriados');
+const { calcularAusentismoUltimaSemana } = require('./analisisAusentismo');
+const { calcularMarcasAbiertas, exportarMarcasAbiertasXlsx } = require('./analisisMarcasAbiertas');
 const { calcularReporteHorasExtras, exportarReporteHorasExtrasXlsx, exportarReporteHorasExtrasPdf } = require('./reporteHorasExtras');
 const { calcularIndicadores, exportarReporteDesvinculacionXlsx, calcularSerieCumplimiento, calcularPresentismoHistorico, CARGOS_DASHBOARD } = require('./indicadores');
 const { calcularMatrizAsistencia, exportarMatrizAsistenciaXlsx } = require('./dashboardAsistencia');
@@ -335,6 +341,272 @@ app.delete('/api/fuero-maternal/:id', moduloRequerido('fueroMaternal'), async (r
   }
 });
 
+// --- Cartas de Amonestación ---
+
+// --- Catálogo de Motivos (Motivo -> Causal reutilizable) ---
+
+app.get('/api/motivos-amonestacion', moduloRequerido('amonestaciones'), async (req, res) => {
+  try {
+    const { rows } = await pool.query('SELECT * FROM motivos_amonestacion ORDER BY motivo');
+    res.json(rows);
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.post('/api/motivos-amonestacion', moduloRequerido('amonestaciones'), async (req, res) => {
+  try {
+    const { motivo, causal, autocompletar_atrasos } = req.body;
+    if (!motivo || !motivo.trim() || !causal || !causal.trim()) {
+      return res.status(400).json({ error: 'motivo y causal son requeridos' });
+    }
+    await pool.query(
+      `INSERT INTO motivos_amonestacion (motivo, causal, autocompletar_atrasos, creado_por) VALUES ($1,$2,$3,$4)
+       ON CONFLICT (motivo) DO UPDATE SET causal = EXCLUDED.causal, autocompletar_atrasos = EXCLUDED.autocompletar_atrasos`,
+      [motivo.trim(), causal.trim(), !!autocompletar_atrasos, req.usuario.nombre || req.usuario.usuario]
+    );
+    res.json({ ok: true });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ ok: false, error: err.message });
+  }
+});
+
+app.delete('/api/motivos-amonestacion/:id', moduloRequerido('amonestaciones'), async (req, res) => {
+  try {
+    await pool.query('DELETE FROM motivos_amonestacion WHERE id = $1', [req.params.id]);
+    res.json({ ok: true });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ ok: false, error: err.message });
+  }
+});
+
+app.get('/api/amonestaciones', moduloRequerido('amonestaciones'), async (req, res) => {
+  try {
+    const { rut } = req.query;
+    let sql = `SELECT id, rut, fecha, motivo, causal, generado_por, creado_en FROM amonestaciones WHERE 1=1`;
+    const params = [];
+    if (rut) { params.push(rut); sql += ` AND rut = $${params.length}`; }
+    sql += ' ORDER BY fecha DESC, creado_en DESC';
+    const { rows } = await pool.query(sql, params);
+    res.json(rows);
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.post('/api/amonestaciones', moduloRequerido('amonestaciones'), async (req, res) => {
+  try {
+    const { rut, fecha, motivo, causal, direccion, comuna, tabla_atrasos } = req.body;
+    if (!rut || !fecha || !causal || !causal.trim()) {
+      return res.status(400).json({ error: 'rut, fecha y causal son requeridos' });
+    }
+    const { rows: empRows } = await pool.query(
+      'SELECT nombre, apellido_paterno, apellido_materno, direccion, comuna FROM empleados WHERE rut = $1',
+      [rut]
+    );
+    if (empRows.length === 0) return res.status(404).json({ error: 'Trabajador no encontrado' });
+    const emp = empRows[0];
+    const nombreCompleto = `${emp.nombre} ${emp.apellido_paterno || ''} ${emp.apellido_materno || ''}`.replace(/\s+/g, ' ').trim();
+    const direccionFinal = direccion || emp.direccion || '';
+    const comunaFinal = comuna || emp.comuna || '';
+
+    const pdfBuffer = await generarAmonestacionPDF({
+      nombreTrabajador: nombreCompleto,
+      run: rut,
+      direccion: direccionFinal,
+      comuna: comunaFinal,
+      fecha,
+      causal: causal.trim(),
+      tablaAtrasos: Array.isArray(tabla_atrasos) ? tabla_atrasos : null,
+    });
+    const docxBuffer = await generarAmonestacionDOCX({
+      nombreTrabajador: nombreCompleto,
+      run: rut,
+      direccion: direccionFinal,
+      comuna: comunaFinal,
+      fecha,
+      causal: causal.trim(),
+      tablaAtrasos: Array.isArray(tabla_atrasos) ? tabla_atrasos : null,
+    });
+
+    // Guarda la dirección/comuna en la ficha del trabajador si no las tenía,
+    // para no tener que volver a escribirlas la próxima vez.
+    if (direccion && !emp.direccion) await pool.query('UPDATE empleados SET direccion = $1 WHERE rut = $2', [direccion, rut]);
+    if (comuna && !emp.comuna) await pool.query('UPDATE empleados SET comuna = $1 WHERE rut = $2', [comuna, rut]);
+
+    const { rows } = await pool.query(
+      `INSERT INTO amonestaciones (rut, fecha, motivo, causal, direccion, comuna, pdf_contenido, docx_contenido, generado_por)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9) RETURNING id`,
+      [rut, fecha, motivo || null, causal.trim(), direccionFinal, comunaFinal, pdfBuffer, docxBuffer, req.usuario.nombre || req.usuario.usuario]
+    );
+    res.json({ ok: true, id: rows[0].id });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ ok: false, error: err.message });
+  }
+});
+
+// Detalle de días con atraso (marca de Talana) del trabajador en el último
+// mes — usado para autocompletar el causal de amonestaciones por atrasos
+// reiterados. Aplica el mismo umbral de tolerancia que el resto del sistema
+// (16+ minutos de diferencia cuenta como atraso).
+app.get('/api/amonestaciones/atrasos-detalle', moduloRequerido('amonestaciones'), async (req, res) => {
+  try {
+    const { rut, hasta } = req.query;
+    if (!rut) return res.status(400).json({ error: 'rut es requerido' });
+    const fechaHasta = hasta || new Date().toISOString().slice(0, 10);
+    const fechaDesde = `${fechaHasta.slice(0, 7)}-01`; // 1° del mes en curso (según la fecha de la carta)
+
+    const filas = await generarDetalleMarcaciones(pool, { rut, desde: fechaDesde, hasta: fechaHasta }, Infinity);
+    const atrasos = filas
+      .filter(f => f.entrada_mpg && f.hora_entrada_esperada)
+      .map(f => {
+        const [he, me] = f.hora_entrada_esperada.split(':').map(Number);
+        const [hr, mr] = f.entrada_mpg.split(':').map(Number);
+        const diffMin = (hr * 60 + mr) - (he * 60 + me);
+        // Mismo criterio que el resto del sistema: solo cuenta desde el
+        // minuto 16, y el atraso mostrado es el EXCESO sobre los 15 minutos
+        // de tolerancia (no la diferencia completa).
+        const minutosAtraso = diffMin >= 16 ? diffMin - 15 : 0;
+        return {
+          fecha: f.fecha, hora_entrada_esperada: f.hora_entrada_esperada.slice(0, 5),
+          entrada_real: f.entrada_mpg.slice(0, 5), minutos_atraso: minutosAtraso,
+        };
+      })
+      .filter(f => f.minutos_atraso > 0)
+      .sort((a, b) => a.fecha.localeCompare(b.fecha));
+
+    res.json(atrasos);
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.get('/api/amonestaciones/:id/pdf', moduloRequerido('amonestaciones'), async (req, res) => {
+  try {
+    const { rows } = await pool.query('SELECT rut, fecha, pdf_contenido FROM amonestaciones WHERE id = $1', [req.params.id]);
+    if (rows.length === 0) return res.status(404).json({ error: 'No encontrado' });
+    res.setHeader('Content-Type', 'application/pdf');
+    res.setHeader('Content-Disposition', `attachment; filename="Amonestacion_${rows[0].rut}_${rows[0].fecha}.pdf"`);
+    res.send(rows[0].pdf_contenido);
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.get('/api/amonestaciones/:id/docx', moduloRequerido('amonestaciones'), async (req, res) => {
+  try {
+    const { rows } = await pool.query('SELECT rut, fecha, docx_contenido FROM amonestaciones WHERE id = $1', [req.params.id]);
+    if (rows.length === 0) return res.status(404).json({ error: 'No encontrado' });
+    if (!rows[0].docx_contenido) return res.status(404).json({ error: 'Esta carta se generó antes de tener la versión en Word. Vuelve a generarla para obtenerla en ambos formatos.' });
+    res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.wordprocessingml.document');
+    res.setHeader('Content-Disposition', `attachment; filename="Amonestacion_${rows[0].rut}_${rows[0].fecha}.docx"`);
+    res.send(rows[0].docx_contenido);
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.delete('/api/amonestaciones/:id', moduloRequerido('amonestaciones'), async (req, res) => {
+  try {
+    await pool.query('DELETE FROM amonestaciones WHERE id = $1', [req.params.id]);
+    res.json({ ok: true });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ ok: false, error: err.message });
+  }
+});
+
+// --- Feriados de Chile ---
+
+app.get('/api/feriados', moduloRequerido('feriados'), async (req, res) => {
+  try {
+    const { anio } = req.query;
+    let sql = 'SELECT * FROM feriados';
+    const params = [];
+    if (anio) { params.push(`${anio}-%`); sql += ' WHERE fecha LIKE $1'; }
+    sql += ' ORDER BY fecha';
+    const { rows } = await pool.query(sql, params);
+    res.json(rows);
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Consulta la API pública de feriados para un año — devuelve la lista SIN
+// guardar nada, para que se revise/edite antes de confirmar.
+app.get('/api/feriados/previsualizar-api', moduloRequerido('feriados'), async (req, res) => {
+  try {
+    const anio = Number(req.query.anio);
+    if (!anio || anio < 2000 || anio > 2100) return res.status(400).json({ error: 'anio inválido' });
+    const feriados = await obtenerFeriadosDesdeApi(anio);
+    res.json(feriados);
+  } catch (err) {
+    console.error(err);
+    res.status(502).json({ error: `No se pudo consultar la API de feriados: ${err.message}` });
+  }
+});
+
+// Guarda (o actualiza) una lista de feriados de una sola vez — usado tanto
+// tras revisar la carga automática, como para registrar varios a mano.
+app.post('/api/feriados/confirmar', moduloRequerido('feriados'), async (req, res) => {
+  try {
+    const { feriados } = req.body;
+    if (!Array.isArray(feriados) || feriados.length === 0) {
+      return res.status(400).json({ error: 'feriados debe ser un arreglo con al menos un elemento' });
+    }
+    const creadoPor = req.usuario.nombre || req.usuario.usuario;
+    let guardados = 0;
+    for (const f of feriados) {
+      if (!f.fecha || !f.nombre) continue;
+      await pool.query(
+        `INSERT INTO feriados (fecha, nombre, irrenunciable, creado_por) VALUES ($1,$2,$3,$4)
+         ON CONFLICT (fecha) DO UPDATE SET nombre = EXCLUDED.nombre, irrenunciable = EXCLUDED.irrenunciable`,
+        [f.fecha, f.nombre, !!f.irrenunciable, creadoPor]
+      );
+      guardados++;
+    }
+    res.json({ ok: true, guardados });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ ok: false, error: err.message });
+  }
+});
+
+app.post('/api/feriados', moduloRequerido('feriados'), async (req, res) => {
+  try {
+    const { fecha, nombre, irrenunciable } = req.body;
+    if (!fecha || !nombre) return res.status(400).json({ error: 'fecha y nombre son requeridos' });
+    await pool.query(
+      `INSERT INTO feriados (fecha, nombre, irrenunciable, creado_por) VALUES ($1,$2,$3,$4)
+       ON CONFLICT (fecha) DO UPDATE SET nombre = EXCLUDED.nombre, irrenunciable = EXCLUDED.irrenunciable`,
+      [fecha, nombre, !!irrenunciable, req.usuario.nombre || req.usuario.usuario]
+    );
+    res.json({ ok: true });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ ok: false, error: err.message });
+  }
+});
+
+app.delete('/api/feriados/:fecha', moduloRequerido('feriados'), async (req, res) => {
+  try {
+    await pool.query('DELETE FROM feriados WHERE fecha = $1', [req.params.fecha]);
+    res.json({ ok: true });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ ok: false, error: err.message });
+  }
+});
+
 app.get('/api/empleados/:rut', async (req, res) => {
   try {
     const { rows: empRows } = await pool.query('SELECT * FROM empleados WHERE rut = $1', [req.params.rut]);
@@ -372,6 +644,34 @@ app.get('/api/reporte-diario/export', async (req, res) => {
     const buffer = await exportarReporteDiarioXlsx(pool, fecha, { excluirAreas: areasExcluidas, cds: cdsFiltro });
     res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
     res.setHeader('Content-Disposition', `attachment; filename="ReporteDiario_${fecha}.xlsx"`);
+    res.send(buffer);
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.get('/api/reporte-diario/atrasos', moduloRequerido('reporte'), async (req, res) => {
+  try {
+    const { desde, hasta, cd } = req.query;
+    if (!desde || !hasta) return res.status(400).json({ error: 'desde y hasta son requeridos (YYYY-MM-DD)' });
+    const cdsFiltro = await resolverCdsFiltro(req, cd);
+    const filas = await calcularReporteAtrasos(pool, { desde, hasta, cds: cdsFiltro });
+    res.json(filas);
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.get('/api/reporte-diario/atrasos/export', moduloRequerido('reporte'), async (req, res) => {
+  try {
+    const { desde, hasta, cd } = req.query;
+    if (!desde || !hasta) return res.status(400).json({ error: 'desde y hasta son requeridos (YYYY-MM-DD)' });
+    const cdsFiltro = await resolverCdsFiltro(req, cd);
+    const buffer = await exportarReporteAtrasosXlsx(pool, { desde, hasta, cds: cdsFiltro });
+    res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
+    res.setHeader('Content-Disposition', `attachment; filename="TrabajadoresConAtrasos_${desde}_a_${hasta}.xlsx"`);
     res.send(buffer);
   } catch (err) {
     console.error(err);
@@ -760,6 +1060,49 @@ app.post('/api/horas-extras/autorizar', moduloRequerido('horasExtras'), async (r
 });
 
 
+app.get('/api/marcas-abiertas', moduloRequerido('dashboard'), async (req, res) => {
+  try {
+    const { desde, hasta, cd } = req.query;
+    if (!desde || !hasta) return res.status(400).json({ error: 'desde y hasta son requeridos (YYYY-MM-DD)' });
+    const cdsFiltro = await resolverCdsFiltro(req, cd);
+    const datos = await calcularMarcasAbiertas(pool, { desde, hasta, cds: cdsFiltro });
+    res.json(datos);
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.get('/api/marcas-abiertas/export', moduloRequerido('dashboard'), async (req, res) => {
+  try {
+    const { desde, hasta, cd } = req.query;
+    if (!desde || !hasta) return res.status(400).json({ error: 'desde y hasta son requeridos (YYYY-MM-DD)' });
+    const cdsFiltro = await resolverCdsFiltro(req, cd);
+    const buffer = await exportarMarcasAbiertasXlsx(pool, { desde, hasta, cds: cdsFiltro });
+    res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
+    res.setHeader('Content-Disposition', `attachment; filename="MarcasAbiertas_${desde}_a_${hasta}.xlsx"`);
+    res.send(buffer);
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.get('/api/ausentismo-recurrente', moduloRequerido('dashboard'), async (req, res) => {
+  try {
+    const { mesesAtras, cd } = req.query;
+    const cdsFiltro = await resolverCdsFiltro(req, cd);
+    const datos = await calcularAusentismoUltimaSemana(pool, {
+      mesesAtras: mesesAtras ? Number(mesesAtras) : 6,
+      cds: cdsFiltro,
+    });
+    res.json(datos);
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
 app.get('/api/indicadores', async (req, res) => {
   try {
     const { desde, hasta, area, cd } = req.query;
@@ -1027,6 +1370,8 @@ const MODULOS_DISPONIBLES = [
   { key: 'asignacion', label: 'Jefe de Turno' },
   { key: 'perfiles', label: 'Perfiles / Áreas' },
   { key: 'fueroMaternal', label: 'Fuero Maternal' },
+  { key: 'feriados', label: 'Feriados' },
+  { key: 'amonestaciones', label: 'Cartas de Amonestación' },
   { key: 'requerimiento', label: 'Requerimiento Dotación' },
   { key: 'ausencias', label: 'Ausencias / Permisos' },
   { key: 'actualizacion', label: 'Actualización diaria' },
@@ -1235,7 +1580,7 @@ app.get('/api/empleados', async (req, res) => {
     const cdsFiltro = await resolverCdsFiltro(req, cd);
     const like = `%${q.trim()}%`;
     let sql = `SELECT e.rut, e.nombre, e.apellido_paterno, e.apellido_materno, e.cargo, e.centro_costo,
-              e.empresa, e.activo, e.motivo_inactivo, e.motivo_termino, e.fecha_termino, e.tipo_contrato, e.cd,
+              e.empresa, e.activo, e.motivo_inactivo, e.motivo_termino, e.fecha_termino, e.tipo_contrato, e.cd, e.direccion, e.comuna,
               a.jefe_turno
        FROM empleados e
        LEFT JOIN jefe_turno_asignacion a ON a.rut = e.rut
@@ -1753,10 +2098,21 @@ app.post('/api/empleados/jefe-turno-masivo', moduloRequerido('perfiles'), upload
   }
 });
 
+app.post('/api/empleados/direccion-masivo', moduloRequerido('perfiles'), upload.single('direccion'), async (req, res) => {
+  try {
+    if (!req.file) return res.status(400).json({ error: 'Falta el archivo con RUT, Comuna y Dirección' });
+    const resultado = await actualizarDireccionDesdeArchivo(pool, req.file.path);
+    res.json({ ok: true, ...resultado });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ ok: false, error: err.message });
+  }
+});
+
 // Editar el perfil de un trabajador existente (cargo, área/centro de costo, nombre)
 app.put('/api/empleados/:rut', moduloRequerido('perfiles'), async (req, res) => {
   try {
-    const { nombre, apellido_paterno, apellido_materno, cargo, centro_costo, estado, fecha_termino, motivo_inactivo, tipo_contrato } = req.body;
+    const { nombre, apellido_paterno, apellido_materno, cargo, centro_costo, estado, fecha_termino, motivo_inactivo, tipo_contrato, direccion, comuna } = req.body;
     const { rows: existe } = await pool.query(
       'SELECT rut, activo, motivo_termino, fecha_termino, motivo_inactivo FROM empleados WHERE rut = $1',
       [req.params.rut]
@@ -1776,16 +2132,18 @@ app.put('/api/empleados/:rut', moduloRequerido('perfiles'), async (req, res) => 
       motivoTerminoNuevo = null;
       fechaTerminoNuevo = null;
       motivoInactivoNuevo = null;
-    } else if (estado === 'R' || estado === 'Des') {
+    } else if (estado === 'R' || estado === 'Des' || estado === 'CcTo') {
       if (!fecha_termino) {
-        return res.status(400).json({ error: 'Debes indicar la fecha de renuncia/desvinculación' });
+        return res.status(400).json({ error: 'Debes indicar la fecha de renuncia/desvinculación/culminación' });
       }
       // El fuero maternal (Art. 201 CT) protege contra la desvinculación por
       // parte de la empresa sin autorización judicial previa — no aplica a
       // la renuncia voluntaria de la propia trabajadora, así que solo se
-      // bloquea "Des". Se puede saltar el bloqueo únicamente si se confirma
+      // bloquea "Des" y "CcTo" (la culminación de un contrato a plazo fijo
+      // tampoco puede aplicarse durante el fuero, según jurisprudencia
+      // mayoritaria). Se puede saltar el bloqueo únicamente si se confirma
       // explícitamente contar con la autorización judicial (desafuero).
-      if (estado === 'Des') {
+      if (estado === 'Des' || estado === 'CcTo') {
         const fuero = await fueroVigente(pool, req.params.rut, fecha_termino);
         if (fuero && !req.body.confirmarDesafuero) {
           return res.status(400).json({
@@ -1815,9 +2173,11 @@ app.put('/api/empleados/:rut', moduloRequerido('perfiles'), async (req, res) => 
          motivo_termino = $7,
          fecha_termino = $8,
          motivo_inactivo = $9,
-         tipo_contrato = COALESCE($10, tipo_contrato)
-       WHERE rut = $11`,
-      [nombre, apellido_paterno, apellido_materno, cargo, centro_costo, activoNuevo, motivoTerminoNuevo, fechaTerminoNuevo, motivoInactivoNuevo, tipo_contrato, req.params.rut]
+         tipo_contrato = COALESCE($10, tipo_contrato),
+         direccion = COALESCE($11, direccion),
+         comuna = COALESCE($12, comuna)
+       WHERE rut = $13`,
+      [nombre, apellido_paterno, apellido_materno, cargo, centro_costo, activoNuevo, motivoTerminoNuevo, fechaTerminoNuevo, motivoInactivoNuevo, tipo_contrato, direccion, comuna, req.params.rut]
     );
     res.json({ ok: true, activo: activoNuevo });
   } catch (err) {

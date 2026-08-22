@@ -1,8 +1,116 @@
 import { useState, useEffect } from 'react';
-import { obtenerReporteDiario, urlDescargaReporteDiario, obtenerLogMarcacion, listarAreas, buscarEmpleados, urlDescargaReporteEmpleadoPDF, urlDescargaReportePorJefeTurnoPDF } from '../api';
+import {
+  obtenerReporteDiario, urlDescargaReporteDiario, obtenerLogMarcacion, listarAreas, buscarEmpleados,
+  urlDescargaReporteEmpleadoPDF, urlDescargaReportePorJefeTurnoPDF, obtenerReporteAtrasos, urlDescargaReporteAtrasos,
+} from '../api';
 
 function hoyISO() {
   return new Date().toISOString().slice(0, 10);
+}
+
+function primerDiaMesISO() {
+  const d = new Date();
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-01`;
+}
+
+function PanelAtrasos({ cdGlobal }) {
+  const [desde, setDesde] = useState(primerDiaMesISO());
+  const [hasta, setHasta] = useState(hoyISO());
+  const [filas, setFilas] = useState(null);
+  const [cargando, setCargando] = useState(false);
+  const [error, setError] = useState(null);
+  const [abierto, setAbierto] = useState(false);
+
+  async function buscar() {
+    setCargando(true);
+    setError(null);
+    try {
+      setFilas(await obtenerReporteAtrasos(desde, hasta, cdGlobal || undefined));
+    } catch (err) {
+      setError(err.message);
+    } finally {
+      setCargando(false);
+    }
+  }
+
+  return (
+    <div className="card" style={{ marginBottom: 20, borderColor: 'var(--accent)' }}>
+      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+        <h2>Trabajadores con Atrasos (para Amonestaciones)</h2>
+        <button className="btn" type="button" onClick={() => setAbierto(v => !v)} style={{ padding: '6px 12px', fontSize: '0.82rem' }}>
+          {abierto ? 'Cerrar' : 'Abrir'}
+        </button>
+      </div>
+      <p className="card-desc">
+        Trabajadores con al menos un atraso (marca de Talana, mismo umbral de 16+ minutos que el
+        resto del sistema) en el rango elegido — con la columna de si ya tienen una amonestación
+        vigente por esa causal, para saber a quién le corresponde generar una nueva.
+      </p>
+
+      {abierto && (
+        <>
+          <div className="filters-row">
+            <div className="field">
+              <label>Desde</label>
+              <input type="date" value={desde} onChange={e => setDesde(e.target.value)} />
+            </div>
+            <div className="field">
+              <label>Hasta</label>
+              <input type="date" value={hasta} onChange={e => setHasta(e.target.value)} />
+            </div>
+            <button className="btn" type="button" onClick={buscar} disabled={cargando}>
+              {cargando ? 'Calculando…' : 'Ver reporte'}
+            </button>
+            {filas && filas.length > 0 && (
+              <a className="btn" style={{ textDecoration: 'none' }} href={urlDescargaReporteAtrasos(desde, hasta, cdGlobal)}>
+                Descargar Excel
+              </a>
+            )}
+          </div>
+
+          {error && <p className="status-msg error">{error}</p>}
+
+          {filas && (
+            <div className="table-scroll">
+              <table>
+                <thead>
+                  <tr>
+                    <th>RUT</th>
+                    <th>Nombre</th>
+                    <th>Cargo</th>
+                    <th>Turno</th>
+                    <th>N° Atrasos</th>
+                    <th>¿Ya amonestado?</th>
+                    <th>Fecha última amonestación</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {filas.map(f => (
+                    <tr key={f.rut}>
+                      <td>{f.rut}</td>
+                      <td style={{ fontFamily: 'var(--font-sans)' }}>{f.nombre}</td>
+                      <td style={{ fontFamily: 'var(--font-sans)' }}>{f.cargo}</td>
+                      <td>{f.turno || '—'}</td>
+                      <td><strong>{f.cantidad_atrasos}</strong></td>
+                      <td>
+                        {f.ya_amonestado
+                          ? <span className="badge badge-warn">Sí</span>
+                          : <span className="badge badge-danger">No</span>}
+                      </td>
+                      <td>{f.fecha_ultima_amonestacion || '—'}</td>
+                    </tr>
+                  ))}
+                  {filas.length === 0 && (
+                    <tr><td colSpan={7} className="empty-state">Sin atrasos registrados en este rango.</td></tr>
+                  )}
+                </tbody>
+              </table>
+            </div>
+          )}
+        </>
+      )}
+    </div>
+  );
 }
 
 const ETIQUETA_ERROR = {
@@ -161,6 +269,7 @@ export default function ReporteDiario({ cdGlobal }) {
 
   return (
     <>
+    <PanelAtrasos cdGlobal={cdGlobal} />
     <div className="card">
       <h2>Reporte diario</h2>
       <p className="card-desc">
