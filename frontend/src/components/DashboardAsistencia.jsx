@@ -5,6 +5,7 @@ import GraficoCumplimientoCargo from './GraficoCumplimientoCargo';
 import DashboardPresentismoHistorico from './DashboardPresentismoHistorico';
 import AnalisisAusentismo from './AnalisisAusentismo';
 import AnalisisMarcasAbiertas from './AnalisisMarcasAbiertas';
+import AnalisisIA from './AnalisisIA';
 
 const DIAS_SEMANA = ['dom', 'lun', 'mar', 'mié', 'jue', 'vie', 'sáb'];
 
@@ -86,6 +87,7 @@ export default function DashboardAsistencia({ cdGlobal }) {
       <PanelIndicadores cd={cdGlobal} />
       <GraficoCumplimientoCargo cdGlobal={cdGlobal} />
       <DashboardPresentismoHistorico cdGlobal={cdGlobal} />
+      <AnalisisIA cdGlobal={cdGlobal} />
       <AnalisisAusentismo cdGlobal={cdGlobal} />
       <AnalisisMarcasAbiertas cdGlobal={cdGlobal} />
       <div className="card">

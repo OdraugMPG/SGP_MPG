@@ -23,15 +23,6 @@ async function calcularReporteHorasExtras(pool, filtros) {
 
   const filasDiarias = await generarDetalleMarcaciones(pool, { desde, hasta, cds }, Infinity);
 
-  let autorizacionPorClave = new Map();
-  if (soloAutorizadas) {
-    const { rows } = await pool.query(
-      'SELECT rut, fecha, autorizado FROM horas_extras_autorizacion WHERE fecha BETWEEN $1 AND $2',
-      [desde, hasta]
-    );
-    autorizacionPorClave = new Map(rows.map(r => [`${r.rut}|${r.fecha}`, r.autorizado]));
-  }
-
   const filtroDias = diasSemana && diasSemana.length > 0 ? new Set(diasSemana) : null;
   const filtroTurnos = turnos && turnos.length > 0 ? new Set(turnos.map(t => t.toUpperCase())) : null;
 
@@ -48,8 +39,17 @@ async function calcularReporteHorasExtras(pool, filtros) {
       if (!filtroTurnos.has(turnoNormalizado)) continue;
     }
 
-    const autorizado = autorizacionPorClave.get(`${f.rut}|${f.fecha}`) || false;
-    if (soloAutorizadas && !autorizado) continue;
+    // Como horas_extras_mpg ya viene filtrada por autorización (anticipadas
+    // Y ordinarias se descuentan si no están autorizadas), todo lo que
+    // aparece acá ya está autorizado por alguna de las dos vías — soloAutorizadas
+    // se deja como parámetro aceptado (compatibilidad con el checkbox del
+    // front) pero ya no filtra nada adicional.
+    const anticipadaAporta = f.minutos_anticipados > 0 && f.anticipado_autorizado;
+    const ordinariaAporta = f.minutos_extra_final > 0 && f.ordinaria_autorizada;
+    let autorizadoLabel = 'Sí';
+    if (anticipadaAporta && ordinariaAporta) autorizadoLabel = 'Anticipada + Ordinaria';
+    else if (anticipadaAporta) autorizadoLabel = 'Anticipada';
+    else if (ordinariaAporta) autorizadoLabel = 'Ordinaria';
 
     filas.push({
       fecha: f.fecha,
@@ -61,7 +61,7 @@ async function calcularReporteHorasExtras(pool, filtros) {
       entrada: f.entrada_mpg,
       salida: f.salida_mpg,
       horas_extras: f.horas_extras_mpg,
-      autorizado: soloAutorizadas ? true : (autorizado ? 'Sí' : 'Pendiente'),
+      autorizado: autorizadoLabel,
     });
   }
 
@@ -169,4 +169,107 @@ async function exportarReporteHorasExtrasPdf(pool, filtros) {
   });
 }
 
-module.exports = { calcularReporteHorasExtras, exportarReporteHorasExtrasXlsx, exportarReporteHorasExtrasPdf };
+// Genera UN solo PDF con una sección por trabajador (salto de página entre
+// cada uno) — pensado para imprimir y que cada trabajador revise y firme su
+// propio detalle de horas extras del período, en vez de una tabla larga
+// mezclada como exportarReporteHorasExtrasPdf.
+async function exportarReporteHorasExtrasPorTrabajadorPdf(pool, filtros) {
+  const filas = await calcularReporteHorasExtras(pool, filtros);
+
+  const porRut = new Map(); // rut -> { nombre, cargo, filas: [...] }
+  for (const f of filas) {
+    if (!porRut.has(f.rut)) porRut.set(f.rut, { nombre: f.nombre, cargo: f.cargo, filas: [] });
+    porRut.get(f.rut).filas.push(f);
+  }
+  const trabajadores = [...porRut.entries()]
+    .map(([rut, datos]) => ({ rut, ...datos }))
+    .sort((a, b) => (a.nombre || '').localeCompare(b.nombre || ''));
+
+  return new Promise((resolve, reject) => {
+    const doc = new PDFDocument({ margin: 40, size: 'A4' });
+    const buffers = [];
+    doc.on('data', b => buffers.push(b));
+    doc.on('end', () => resolve(Buffer.concat(buffers)));
+    doc.on('error', reject);
+
+    const startX = 40;
+    const cols = [
+      { key: 'fecha', label: 'Fecha', width: 65 },
+      { key: 'dia_semana', label: 'Día', width: 40 },
+      { key: 'turno', label: 'Turno', width: 60 },
+      { key: 'entrada', label: 'Entrada', width: 65 },
+      { key: 'salida', label: 'Salida', width: 65 },
+      { key: 'horas_extras', label: 'H. Extras', width: 70 },
+      { key: 'autorizado', label: 'Autorizado', width: 100 },
+    ];
+
+    function dibujarEncabezadoTabla(y) {
+      let x = startX;
+      doc.font('Helvetica-Bold').fontSize(9);
+      for (const c of cols) { doc.text(c.label, x, y, { width: c.width }); x += c.width; }
+      doc.moveTo(startX, y + 12).lineTo(x, y + 12).stroke();
+      doc.font('Helvetica').fontSize(9);
+      return y + 16;
+    }
+
+    if (trabajadores.length === 0) {
+      doc.fontSize(12).font('Helvetica').text('Sin horas extras autorizadas para estos filtros en el período.', startX, 40);
+      doc.end();
+      return;
+    }
+
+    trabajadores.forEach((t, indice) => {
+      if (indice > 0) doc.addPage();
+
+      const totalMinTrabajador = t.filas.reduce((acc, f) => acc + horasFormatoAMinutos(f.horas_extras), 0);
+      const totalFormato = `${String(Math.floor(totalMinTrabajador / 60)).padStart(2, '0')}:${String(totalMinTrabajador % 60).padStart(2, '0')}`;
+
+      doc.x = startX;
+      doc.fontSize(14).font('Helvetica-Bold').text('Reporte de Horas Extras', { align: 'center' });
+      doc.moveDown(0.6);
+      doc.x = startX;
+      doc.fontSize(10).font('Helvetica');
+      doc.text(`Trabajador: ${t.nombre || '—'}`, startX);
+      doc.text(`RUT: ${t.rut}`, startX);
+      doc.text(`Cargo: ${t.cargo || '—'}`, startX);
+      doc.text(`Período: ${filtros.desde} a ${filtros.hasta}`, startX);
+      doc.text(`Total horas extras autorizadas del período: ${totalFormato}`, startX);
+      doc.moveDown(0.8);
+
+      let y = dibujarEncabezadoTabla(doc.y);
+      for (const f of t.filas) {
+        if (y > 700) { doc.addPage(); y = dibujarEncabezadoTabla(40); }
+        let x = startX;
+        for (const c of cols) {
+          doc.text(String(f[c.key] ?? '—'), x, y, { width: c.width });
+          x += c.width;
+        }
+        y += 15;
+      }
+
+      doc.x = startX;
+      doc.y = y + 40;
+      if (doc.y > 680) { doc.addPage(); doc.x = startX; doc.y = 40; }
+
+      doc.moveTo(startX, doc.y).lineTo(startX + 220, doc.y).stroke();
+      doc.moveTo(startX + 280, doc.y).lineTo(startX + 500, doc.y).stroke();
+      doc.y += 5;
+      doc.fontSize(9).font('Helvetica');
+      doc.text('Firma Trabajador', startX, doc.y, { width: 220, align: 'center' });
+      doc.text('Firma Supervisor / Jefe de Turno', startX + 280, doc.y, { width: 220, align: 'center' });
+      doc.moveDown(1.2);
+      doc.fontSize(8).fillColor('#666').text(
+        'Declaro haber revisado el detalle de horas extras indicado arriba, correspondiente al período señalado.',
+        startX
+      );
+      doc.fillColor('black');
+    });
+
+    doc.end();
+  });
+}
+
+module.exports = {
+  calcularReporteHorasExtras, exportarReporteHorasExtrasXlsx, exportarReporteHorasExtrasPdf,
+  exportarReporteHorasExtrasPorTrabajadorPdf,
+};

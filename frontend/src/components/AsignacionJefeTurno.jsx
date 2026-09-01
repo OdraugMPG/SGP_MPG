@@ -2,7 +2,7 @@ import { useState, useEffect, useCallback, Fragment } from 'react';
 import {
   buscarEmpleados, listarAsignacionesJefeTurno, asignarJefeTurno, quitarAsignacionJefeTurno,
   listarOpcionesRotacion, listarRotacionTurnos, editarRotacionTurno, listarHorarioPlano, editarHorarioPlano,
-  listarMatrizRotacion, guardarMatrizRotacion, recalcularResultados,
+  listarMatrizRotacion, guardarMatrizRotacion, recalcularResultados, urlDescargaJefeTurnoExcel,
 } from '../api';
 
 const DIAS_SEMANA = ['Lun', 'Mar', 'Mié', 'Jue', 'Vie', 'Sáb', 'Dom'];
@@ -535,7 +535,16 @@ export default function AsignacionJefeTurno({ cdGlobal }) {
     <PanelRotacionTurnos />
     <PanelHorarioPlano />
     <div className="card">
-      <h2>Asignación de Jefe de Turno</h2>
+      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', flexWrap: 'wrap', gap: 10 }}>
+        <h2>Asignación de Jefe de Turno</h2>
+        <a
+          className="btn" style={{ textDecoration: 'none' }}
+          href={urlDescargaJefeTurnoExcel(cdGlobal)} target="_blank" rel="noreferrer"
+          title="Excel con todos los trabajadores activos (RUT, nombre, cargo, CD, centro de costo y jefe de turno asignado)"
+        >
+          Descargar Excel — Trabajadores Activos {cdGlobal ? `(${cdGlobal})` : '(todos los CD)'}
+        </a>
+      </div>
       <p className="card-desc">
         Busca un trabajador por RUT o nombre y asígnalo a un jefe de turno (grupo rotativo AM/PM/Noche)
         o márcalo como Turno Plano (horario fijo, sin jefatura). Al guardar, se recalculan los atrasos.

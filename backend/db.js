@@ -78,9 +78,9 @@ async function initDb() {
       hora_salida TEXT NOT NULL
     );
 
-    -- Preparada para la futura autorización de horas extras (aún sin flujo
-    -- de aprobación activo) — por defecto todo queda "no autorizado" hasta
-    -- que se construya ese módulo.
+    -- Autorización de horas extras ANTICIPADAS (entrada antes del horario
+    -- esperado) — sin flujo de solicitud/aprobación, un único botón
+    -- "Autorizar" habilitado para el módulo 'horasExtras' completo.
     CREATE TABLE IF NOT EXISTS horas_extras_autorizacion (
       rut TEXT NOT NULL,
       fecha TEXT NOT NULL,
@@ -88,6 +88,24 @@ async function initDb() {
       autorizado_por TEXT,
       autorizado_en TIMESTAMP,
       observacion TEXT,
+      PRIMARY KEY (rut, fecha)
+    );
+
+    -- Autorización de horas extras ORDINARIAS (minutos trabajados después de
+    -- la hora de salida esperada) — sí tiene flujo de solicitud/aprobación:
+    -- el Jefe de Turno solicita (permiso 'horasExtrasSolicitar'), el Jefe de
+    -- Operaciones o un admin aprueba/rechaza (permiso 'horasExtrasAprobar').
+    -- Sin fila para un rut+fecha = "pendiente" (nadie ha hecho nada todavía).
+    CREATE TABLE IF NOT EXISTS horas_extras_ordinarias_autorizacion (
+      rut TEXT NOT NULL,
+      fecha TEXT NOT NULL,
+      estado TEXT NOT NULL, -- 'solicitado' | 'autorizado' | 'rechazado'
+      solicitado_por TEXT,
+      solicitado_en TIMESTAMP,
+      observacion_solicitud TEXT,
+      resuelto_por TEXT,
+      resuelto_en TIMESTAMP,
+      observacion_resolucion TEXT,
       PRIMARY KEY (rut, fecha)
     );
 
@@ -261,6 +279,20 @@ async function initDb() {
       creado_por TEXT,
       creado_en TIMESTAMP DEFAULT now()
     );
+
+    -- Informes generados por el agente de IA (rotación de personal +
+    -- ausentismo recurrente). Se guarda tanto la narrativa como los datos
+    -- de respaldo que se le entregaron al modelo, para poder revisar
+    -- informes anteriores sin volver a llamar a la API.
+    CREATE TABLE IF NOT EXISTS informes_ia (
+      id SERIAL PRIMARY KEY,
+      periodo TEXT NOT NULL,
+      narrativa TEXT NOT NULL,
+      datos JSONB NOT NULL,
+      generado_por TEXT,
+      creado_en TIMESTAMP DEFAULT now()
+    );
+    CREATE INDEX IF NOT EXISTS idx_informes_ia_creado ON informes_ia(creado_en DESC);
   `);
 
   // Migración segura para bases creadas antes de agregar esta columna.
@@ -334,15 +366,17 @@ async function initDb() {
   // razonable de módulos por defecto, que el administrador puede ajustar
   // libremente desde "Usuarios" — incluyendo crear roles nuevos.
   const TODOS_LOS_MODULOS = [
-    'dashboard', 'resultados', 'detalle', 'reporte', 'nomina', 'horasExtras', 'asignacion', 'perfiles',
-    'requerimiento', 'ausencias', 'actualizacion', 'carga', 'usuarios', 'fueroMaternal', 'amonestaciones', 'feriados',
+    'dashboard', 'resultados', 'detalle', 'reporte', 'nomina', 'horasExtras', 'horasExtrasSolicitar', 'horasExtrasAprobar',
+    'asignacion', 'perfiles', 'requerimiento', 'ausencias', 'actualizacion', 'carga', 'usuarios', 'fueroMaternal',
+    'amonestaciones', 'feriados',
   ];
   const rolesIniciales = [
     { nombre: 'admin', modulos: TODOS_LOS_MODULOS, es_sistema: true },
     { nombre: 'usuario', modulos: ['dashboard', 'resultados'], es_sistema: true },
     { nombre: 'Gerente', modulos: ['dashboard', 'resultados', 'detalle', 'reporte'], es_sistema: false },
-    { nombre: 'Jefe Operaciones', modulos: ['dashboard', 'resultados', 'detalle', 'reporte', 'asignacion', 'requerimiento', 'ausencias', 'feriados'], es_sistema: false },
-    { nombre: 'Jefe Turno', modulos: ['dashboard', 'resultados', 'reporte', 'asignacion', 'ausencias'], es_sistema: false },
+    // Jefe Operaciones aprueba las horas extras ordinarias que solicita el Jefe de Turno.
+    { nombre: 'Jefe Operaciones', modulos: ['dashboard', 'resultados', 'detalle', 'reporte', 'asignacion', 'requerimiento', 'ausencias', 'feriados', 'horasExtrasAprobar'], es_sistema: false },
+    { nombre: 'Jefe Turno', modulos: ['dashboard', 'resultados', 'reporte', 'asignacion', 'ausencias', 'horasExtrasSolicitar'], es_sistema: false },
     { nombre: 'Supervisor', modulos: ['resultados', 'reporte', 'ausencias', 'actualizacion'], es_sistema: false },
     { nombre: 'KAM', modulos: ['dashboard', 'reporte'], es_sistema: false },
     { nombre: 'RRHH', modulos: ['dashboard', 'resultados', 'perfiles', 'ausencias', 'requerimiento', 'nomina', 'fueroMaternal', 'amonestaciones'], es_sistema: false },
@@ -353,6 +387,19 @@ async function initDb() {
       [r.nombre, r.modulos, r.es_sistema]
     );
   }
+
+  // Migración: si los roles "Jefe Turno"/"Jefe Operaciones" ya existían de
+  // antes (el INSERT de arriba no los toca por el ON CONFLICT DO NOTHING),
+  // igual les agrega el permiso nuevo del flujo de horas extras ordinarias
+  // — sin pisar el resto de los módulos que el administrador ya les asignó.
+  await pool.query(`
+    UPDATE roles SET modulos = array_append(modulos, 'horasExtrasSolicitar')
+    WHERE nombre = 'Jefe Turno' AND NOT ('horasExtrasSolicitar' = ANY(modulos))
+  `);
+  await pool.query(`
+    UPDATE roles SET modulos = array_append(modulos, 'horasExtrasAprobar')
+    WHERE nombre = 'Jefe Operaciones' AND NOT ('horasExtrasAprobar' = ANY(modulos))
+  `);
 
   // Siembra inicial del horario Plano (los mismos valores que antes estaban
   // fijos en el código — se puede seguir ajustando desde el módulo).

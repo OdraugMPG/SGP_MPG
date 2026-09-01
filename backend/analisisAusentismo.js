@@ -87,6 +87,7 @@ async function calcularAusentismoUltimaSemana(pool, filtros) {
     cargoCdUniverso.get(clave).dotacion_activa++;
   }
   const faltasPorCargoCd = new Map(); // clave -> { total_faltas, trabajadores: Set }
+  const faltasPorCargoCdMes = new Map(); // clave -> Map(etiquetaMes -> cantidad), para ver tendencia
   for (const a of ausencias) {
     const emp = empleadoPorRut.get(a.rut);
     if (!emp) continue;
@@ -94,6 +95,13 @@ async function calcularAusentismoUltimaSemana(pool, filtros) {
     if (!faltasPorCargoCd.has(clave)) faltasPorCargoCd.set(clave, { total_faltas: 0, trabajadores: new Set() });
     faltasPorCargoCd.get(clave).total_faltas++;
     faltasPorCargoCd.get(clave).trabajadores.add(a.rut);
+
+    const etiquetaMes = mesDeFecha(a.fecha);
+    if (etiquetaMes) {
+      if (!faltasPorCargoCdMes.has(clave)) faltasPorCargoCdMes.set(clave, new Map());
+      const porMes = faltasPorCargoCdMes.get(clave);
+      porMes.set(etiquetaMes, (porMes.get(etiquetaMes) || 0) + 1);
+    }
   }
   const recurrentesPorCargoCd = new Map(); // clave -> cantidad
   for (const t of trabajadoresRecurrentes) {
@@ -104,6 +112,7 @@ async function calcularAusentismoUltimaSemana(pool, filtros) {
   const resumenPorCargo = [...cargoCdUniverso.values()].map(u => {
     const clave = `${u.cargo}|${u.cd}`;
     const f = faltasPorCargoCd.get(clave);
+    const porMes = faltasPorCargoCdMes.get(clave);
     return {
       cargo: u.cargo,
       cd: u.cd,
@@ -111,6 +120,9 @@ async function calcularAusentismoUltimaSemana(pool, filtros) {
       total_faltas: f?.total_faltas || 0,
       trabajadores_con_falta: f ? f.trabajadores.size : 0,
       trabajadores_recurrentes: recurrentesPorCargoCd.get(clave) || 0,
+      // Cantidad de faltas por mes, en el mismo orden que meses_analizados
+      // (útil para ver tendencia: al alza, estable, a la baja).
+      serie_mensual: meses.map(m => porMes?.get(m.etiqueta) || 0),
     };
   }).sort((a, b) => b.total_faltas - a.total_faltas || a.cargo.localeCompare(b.cargo));
 

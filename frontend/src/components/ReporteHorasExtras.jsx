@@ -1,6 +1,6 @@
 import { useState } from 'react';
 import {
-  obtenerReporteHorasExtras, urlDescargaHorasExtrasExcel, urlDescargaHorasExtrasPdf,
+  obtenerReporteHorasExtras, urlDescargaHorasExtrasExcel, urlDescargaHorasExtrasPdf, urlDescargaHorasExtrasPdfPorTrabajador,
 } from '../api';
 
 function primerDiaMesISO() {
@@ -33,7 +33,6 @@ export default function ReporteHorasExtras({ cdGlobal }) {
   const [hasta, setHasta] = useState(hoyISO());
   const [diasSemana, setDiasSemana] = useState(DIAS.map(d => d.valor)); // todos marcados por defecto
   const [turnos, setTurnos] = useState(TURNOS.map(t => t.valor)); // todos marcados por defecto
-  const [soloAutorizadas, setSoloAutorizadas] = useState(false);
   const [filas, setFilas] = useState(null);
   const [cargando, setCargando] = useState(false);
   const [error, setError] = useState(null);
@@ -53,7 +52,7 @@ export default function ReporteHorasExtras({ cdGlobal }) {
     setCargando(true);
     setError(null);
     try {
-      setFilas(await obtenerReporteHorasExtras(desde, hasta, diasSemana, turnos, cdGlobal || undefined, soloAutorizadas));
+      setFilas(await obtenerReporteHorasExtras(desde, hasta, diasSemana, turnos, cdGlobal || undefined));
     } catch (err) {
       setError(err.message);
     } finally {
@@ -74,8 +73,9 @@ export default function ReporteHorasExtras({ cdGlobal }) {
       <p className="card-desc">
         Detalle de horas extras por trabajador en el rango de fechas que elijas — filtra además por
         día(s) de la semana si solo necesitas, por ejemplo, un día particular (o excluir domingos).
-        La columna "Autorizado" queda preparada para el módulo de autorización de horas extras que
-        viene en una próxima actualización — por ahora todo aparece como "Pendiente".
+        Solo se muestran horas extras ya <strong>autorizadas</strong> (anticipadas y/o ordinarias) —
+        las que todavía están pendientes de solicitud o aprobación no aparecen acá; revísalas en
+        "Aprobación Horas Extras".
       </p>
 
       <div className="filters-row">
@@ -92,11 +92,18 @@ export default function ReporteHorasExtras({ cdGlobal }) {
         </button>
         {filas && filas.length > 0 && (
           <>
-            <a className="btn" style={{ textDecoration: 'none' }} href={urlDescargaHorasExtrasExcel(desde, hasta, diasSemana, turnos, cdGlobal, soloAutorizadas)}>
+            <a className="btn" style={{ textDecoration: 'none' }} href={urlDescargaHorasExtrasExcel(desde, hasta, diasSemana, turnos, cdGlobal)}>
               Descargar Excel
             </a>
-            <a className="btn" style={{ textDecoration: 'none' }} href={urlDescargaHorasExtrasPdf(desde, hasta, diasSemana, turnos, cdGlobal, soloAutorizadas)}>
+            <a className="btn" style={{ textDecoration: 'none' }} href={urlDescargaHorasExtrasPdf(desde, hasta, diasSemana, turnos, cdGlobal)}>
               Descargar PDF
+            </a>
+            <a
+              className="btn" style={{ textDecoration: 'none' }}
+              href={urlDescargaHorasExtrasPdfPorTrabajador(desde, hasta, diasSemana, turnos, cdGlobal)}
+              title="Un PDF con una hoja por trabajador y espacio de firma, para imprimir y validar en terreno"
+            >
+              Descargar PDF por Trabajador
             </a>
           </>
         )}
@@ -126,10 +133,6 @@ export default function ReporteHorasExtras({ cdGlobal }) {
             </label>
           ))}
         </div>
-        <label style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: '0.82rem', cursor: 'pointer', marginTop: 10, paddingTop: 10, borderTop: '1px solid var(--border)' }}>
-          <input type="checkbox" checked={soloAutorizadas} onChange={e => setSoloAutorizadas(e.target.checked)} />
-          Mostrar solo horas extras autorizadas (aún sin flujo de aprobación — por ahora esto mostrará vacío)
-        </label>
       </div>
 
       {cdGlobal && (
@@ -173,11 +176,7 @@ export default function ReporteHorasExtras({ cdGlobal }) {
                     <td>{f.entrada}</td>
                     <td>{f.salida}</td>
                     <td><strong>{f.horas_extras}</strong></td>
-                    <td>
-                      {f.autorizado === 'Sí' || f.autorizado === true
-                        ? <span className="badge badge-ok">Sí</span>
-                        : <span className="badge badge-muted">Pendiente</span>}
-                    </td>
+                    <td><span className="badge badge-ok">{f.autorizado}</span></td>
                   </tr>
                 ))}
                 {filas.length === 0 && (

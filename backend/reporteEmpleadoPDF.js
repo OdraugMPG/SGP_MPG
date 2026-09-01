@@ -4,6 +4,7 @@ const {
   minutosAjusteColacion, construirRotacionBasePorClave,
 } = require('./importar');
 const { corregirMarcasDuplicadas, horarioProgramado, horaAMinutos, minutosAHora } = require('./reporteDiario');
+const { generarDetalleMarcaciones } = require('./detalleMarcaciones');
 
 function etiquetaTurno(tipoTurno) {
   if (tipoTurno === 'NOCHE') return 'Noche';
@@ -117,6 +118,16 @@ async function calcularDatosReporteEmpleado(pool, rut, mes) {
     f = sumarDias(f, 1);
   }
 
+  // Horas extras por día — se reutiliza el mismo cálculo que ya usan Cierre
+  // de Nómina y el Reporte de Horas Extras (autorizadas, anticipadas y
+  // ordinarias), en vez de duplicar la lógica acá, para que el número nunca
+  // quede desincronizado entre reportes.
+  const filasHorasExtras = await generarDetalleMarcaciones(pool, { rut, desde, hasta }, Infinity);
+  const horasExtrasPorFecha = new Map(filasHorasExtras.map(fx => [fx.fecha, fx.horas_extras_mpg]));
+  for (const fila of filas) {
+    fila.horasExtras = horasExtrasPorFecha.get(fila.fecha) || null;
+  }
+
   const resumenAusencias = {};
   for (const fila of filas) {
     if (fila.ausencia) resumenAusencias[fila.ausencia] = (resumenAusencias[fila.ausencia] || 0) + 1;
@@ -124,12 +135,13 @@ async function calcularDatosReporteEmpleado(pool, rut, mes) {
   const diasConAsistencia = filas.filter(f2 => f2.entrada).length;
   const diasConAtraso = filas.filter(f2 => f2.atrasoMin > 0).length;
   const minutosAtrasoTotal = filas.reduce((acc, f2) => acc + (f2.atrasoMin || 0), 0);
+  const minutosExtrasTotal = filas.reduce((acc, f2) => acc + (f2.horasExtras ? horaAMinutos(f2.horasExtras) : 0), 0);
   const resumenErrores = {};
   for (const l of logs) resumenErrores[l.tipo_error] = (resumenErrores[l.tipo_error] || 0) + 1;
 
   return {
     emp, codigoJefeTurno, mes, desde, hasta, filas, logs,
-    resumen: { diasConAsistencia, diasConAtraso, minutosAtrasoTotal, resumenAusencias, resumenErrores },
+    resumen: { diasConAsistencia, diasConAtraso, minutosAtrasoTotal, minutosExtrasTotal, resumenAusencias, resumenErrores },
   };
 }
 
@@ -163,7 +175,8 @@ function dibujarSeccionEmpleado(doc, datos, esPrimera) {
     { key: 'salida', label: 'Salida', width: 46 },
     { key: 'horas', label: 'Horas', width: 40 },
     { key: 'atraso', label: 'Atraso', width: 38 },
-    { key: 'obs', label: 'Observación', width: 160 },
+    { key: 'extras', label: 'H. Extras', width: 42 },
+    { key: 'obs', label: 'Observación', width: 128 },
   ];
 
   function dibujarEncabezadoTabla(y) {
@@ -194,6 +207,7 @@ function dibujarSeccionEmpleado(doc, datos, esPrimera) {
       salida: (fila.salida || '—') + (fila.salidaSancion ? ' *' : ''),
       horas: fila.horasTrabajadas || '—',
       atraso: fila.atrasoMin !== null ? String(fila.atrasoMin) : '—',
+      extras: fila.horasExtras || '—',
       obs,
     };
     let x = startX;
@@ -217,6 +231,7 @@ function dibujarSeccionEmpleado(doc, datos, esPrimera) {
   doc.font('Helvetica').fontSize(9.5);
   doc.text(`Días con asistencia registrada: ${resumen.diasConAsistencia}`, startX);
   doc.text(`Días con atraso: ${resumen.diasConAtraso}  (total ${resumen.minutosAtrasoTotal} min)`, startX);
+  doc.text(`Horas extras autorizadas del período: ${formatoHorasMin(resumen.minutosExtrasTotal)}`, startX);
 
   doc.moveDown(0.5);
   doc.font('Helvetica-Bold').text('Ausencias y permisos del período:', startX);

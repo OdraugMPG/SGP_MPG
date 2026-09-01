@@ -285,10 +285,16 @@ export default function Amonestaciones() {
             <div className="field" style={{ marginBottom: 14, maxWidth: 420 }}>
               <label>Motivo (opcional — autocompleta el causal, lo puedes seguir ajustando)</label>
               <select value={motivoId} onChange={e => elegirMotivo(e.target.value)} className="file-input" disabled={buscandoAtrasos}>
-                <option value="">— Redactar causal manualmente —</option>
+                <option value="">Otro (no está en la lista) — escribir causal manualmente</option>
                 {motivos.map(m => <option key={m.id} value={m.id}>{m.motivo}{m.autocompletar_atrasos ? ' (busca atrasos automático)' : ''}</option>)}
               </select>
               {buscandoAtrasos && <p style={{ fontSize: '0.78rem', color: 'var(--text-muted)', marginTop: 6 }}>Buscando atrasos del mes en curso…</p>}
+              {!motivoId && (
+                <p style={{ fontSize: '0.78rem', color: 'var(--text-muted)', marginTop: 6 }}>
+                  Redacta el causal libremente abajo. Si este motivo se va a repetir, considera
+                  guardarlo en el "Catálogo de Motivos" arriba para reutilizarlo la próxima vez.
+                </p>
+              )}
             </div>
 
             <div className="field" style={{ marginBottom: 14 }}>

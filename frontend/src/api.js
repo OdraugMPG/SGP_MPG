@@ -243,6 +243,12 @@ export function urlDescargaHorasExtrasPdf(desde, hasta, diasSemana, turnos, cd, 
   return `${API_URL}/api/horas-extras/export-pdf?${params.toString()}`;
 }
 
+export function urlDescargaHorasExtrasPdfPorTrabajador(desde, hasta, diasSemana, turnos, cd) {
+  const params = armarParamsHorasExtras(desde, hasta, diasSemana, turnos, cd);
+  params.append('token', obtenerToken() || '');
+  return `${API_URL}/api/horas-extras/export-pdf-trabajador?${params.toString()}`;
+}
+
 export async function listarCandidatosAutorizacion(desde, hasta, cd) {
   const params = new URLSearchParams({ desde, hasta });
   if (cd) params.append('cd', cd);
@@ -260,6 +266,39 @@ export async function autorizarHoraExtra(rut, fecha, autorizado, observacion) {
   });
   const data = await res.json();
   if (!res.ok || !data.ok) throw new Error(data.error || 'Error al guardar la autorización');
+  return data;
+}
+
+// --- Horas extras ORDINARIAS (flujo de solicitud + aprobación) ---
+
+export async function listarCandidatosOrdinarias(desde, hasta, cd) {
+  const params = new URLSearchParams({ desde, hasta });
+  if (cd) params.append('cd', cd);
+  const res = await authFetch(`${API_URL}/api/horas-extras/ordinarias/candidatos?${params.toString()}`);
+  const data = await res.json();
+  if (!res.ok) throw new Error(data.error || 'Error al listar los candidatos a hora extra ordinaria');
+  return data;
+}
+
+export async function solicitarHoraExtraOrdinaria(rut, fecha, observacion) {
+  const res = await authFetch(`${API_URL}/api/horas-extras/ordinarias/solicitar`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ rut, fecha, observacion }),
+  });
+  const data = await res.json();
+  if (!res.ok || !data.ok) throw new Error(data.error || 'Error al enviar la solicitud');
+  return data;
+}
+
+export async function resolverHoraExtraOrdinaria(rut, fecha, decision, observacion) {
+  const res = await authFetch(`${API_URL}/api/horas-extras/ordinarias/resolver`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ rut, fecha, decision, observacion }),
+  });
+  const data = await res.json();
+  if (!res.ok || !data.ok) throw new Error(data.error || 'Error al resolver la solicitud');
   return data;
 }
 
@@ -381,6 +420,12 @@ export async function quitarAsignacionJefeTurno(rut) {
   const data = await res.json();
   if (!res.ok) throw new Error(data.error || 'Error al quitar asignación');
   return data;
+}
+
+export function urlDescargaJefeTurnoExcel(cd) {
+  const params = new URLSearchParams({ token: obtenerToken() || '' });
+  if (cd) params.append('cd', cd);
+  return `${API_URL}/api/jefe-turno/export?${params.toString()}`;
 }
 
 export async function actualizarMarcaciones(fuente, file) {
@@ -671,6 +716,36 @@ export async function listarRequerimientoDotacionVigente(fecha, cd) {
   const res = await authFetch(`${API_URL}/api/requerimiento-dotacion/vigente?${params.toString()}`);
   const data = await res.json();
   if (!res.ok) throw new Error(data.error || 'Error al consultar el requerimiento vigente');
+  return data;
+}
+
+export async function obtenerMatrizSimuladorDotacion(cd, dias, cargos) {
+  const params = new URLSearchParams({ cd });
+  if (dias) params.append('dias', dias);
+  if (cargos && cargos.length > 0) params.append('cargos', cargos.join(','));
+  const res = await authFetch(`${API_URL}/api/simulador-dotacion/matriz?${params.toString()}`, { cache: 'no-store' });
+  const data = await res.json();
+  if (!res.ok) throw new Error(data.error || 'Error al calcular la matriz de dotación');
+  return data;
+}
+
+export async function obtenerDetalleDiaTurnoSimulador(cargo, cd, dias) {
+  const params = new URLSearchParams({ cargo, cd });
+  if (dias) params.append('dias', dias);
+  const res = await authFetch(`${API_URL}/api/simulador-dotacion/detalle-dia-turno?${params.toString()}`, { cache: 'no-store' });
+  const data = await res.json();
+  if (!res.ok) throw new Error(data.error || 'Error al calcular el detalle por día y turno');
+  return data;
+}
+
+export async function generarAnalisisRiesgoDotacion(cd, filas) {
+  const res = await authFetch(`${API_URL}/api/simulador-dotacion/analisis-ia`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ cd, filas }),
+  });
+  const data = await res.json();
+  if (!res.ok || !data.ok) throw new Error(data.error || 'Error al generar el análisis de riesgo con IA');
   return data;
 }
 
@@ -1009,6 +1084,33 @@ export async function obtenerAusentismoRecurrente(mesesAtras, cd) {
   const res = await authFetch(`${API_URL}/api/ausentismo-recurrente?${params.toString()}`);
   const data = await res.json();
   if (!res.ok) throw new Error(data.error || 'Error al calcular el análisis de ausentismo');
+  return data;
+}
+
+// --- Informe de Análisis con IA (rotación de personal + ausentismo) ---
+
+export async function obtenerHistorialInformesIA() {
+  const res = await authFetch(`${API_URL}/api/analisis-ia/historial`);
+  const data = await res.json();
+  if (!res.ok) throw new Error(data.error || 'Error al listar los informes de IA');
+  return data;
+}
+
+export async function obtenerInformeIA(id) {
+  const res = await authFetch(`${API_URL}/api/analisis-ia/historial/${id}`);
+  const data = await res.json();
+  if (!res.ok) throw new Error(data.error || 'Error al obtener el informe');
+  return data;
+}
+
+export async function generarInformeIA(mesesAtras, cd) {
+  const res = await authFetch(`${API_URL}/api/analisis-ia/generar`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ mesesAtras, cd }),
+  });
+  const data = await res.json();
+  if (!res.ok || !data.ok) throw new Error(data.error || 'Error al generar el informe con IA');
   return data;
 }
 

@@ -19,9 +19,15 @@ const { generarAmonestacionDOCX } = require('./amonestacionDOCX');
 const { obtenerFeriadosDesdeApi } = require('./feriados');
 const { calcularAusentismoUltimaSemana } = require('./analisisAusentismo');
 const { calcularMarcasAbiertas, exportarMarcasAbiertasXlsx } = require('./analisisMarcasAbiertas');
-const { calcularReporteHorasExtras, exportarReporteHorasExtrasXlsx, exportarReporteHorasExtrasPdf } = require('./reporteHorasExtras');
+const { generarInformeIA } = require('./analisisIA');
+const {
+  calcularReporteHorasExtras, exportarReporteHorasExtrasXlsx, exportarReporteHorasExtrasPdf,
+  exportarReporteHorasExtrasPorTrabajadorPdf,
+} = require('./reporteHorasExtras');
 const { calcularIndicadores, exportarReporteDesvinculacionXlsx, calcularSerieCumplimiento, calcularPresentismoHistorico, CARGOS_DASHBOARD } = require('./indicadores');
 const { calcularMatrizAsistencia, exportarMatrizAsistenciaXlsx } = require('./dashboardAsistencia');
+const { calcularMatrizDotacion, calcularDetalleDiaTurno } = require('./simuladorDotacion');
+const { generarAnalisisRiesgoDotacion } = require('./analisisRiesgoDotacion');
 const { DIAS_FALLECIMIENTO, calcularFechaFinFallecimiento } = require('./permisoFallecimiento');
 const { semanaISO, diaDeSemana, resolverJefeTurno, sumarDias, determinarTipoTurno, contratoDesdeRazonSocial, tipoTurnoDesdeHoraEntrada } = require('./importar');
 const { login, requireAuth, requireAdmin } = require('./auth');
@@ -96,6 +102,24 @@ function moduloRequerido(clave) {
   };
 }
 
+// Igual que moduloRequerido, pero pasa si el usuario tiene AL MENOS UNO de
+// los módulos indicados (ej: ver la lista de horas extras ordinarias exige
+// poder solicitarlas O poder aprobarlas, no ambas).
+function algunModuloRequerido(claves) {
+  return async (req, res, next) => {
+    try {
+      if (req.usuario.rol === 'admin') return next();
+      const { rows } = await pool.query('SELECT modulos FROM roles WHERE nombre = $1', [req.usuario.rol]);
+      const modulos = rows[0]?.modulos || [];
+      if (claves.some(c => modulos.includes(c))) return next();
+      return res.status(403).json({ error: `Tu rol ("${req.usuario.rol}") no tiene acceso a este módulo.` });
+    } catch (err) {
+      console.error(err);
+      res.status(500).json({ error: err.message });
+    }
+  };
+}
+
 // Rutas con prefijo exclusivo de un solo módulo: se protegen todas de una vez.
 // (Rutas compartidas entre varios módulos, como la búsqueda de empleados o
 // las listas de áreas/cargos, quedan sin restringir a propósito — son datos
@@ -111,6 +135,11 @@ app.use('/api/indicadores', moduloRequerido('dashboard'));
 app.use('/api/dashboard-asistencia', moduloRequerido('dashboard'));
 app.use('/api/requerimiento-dotacion', moduloRequerido('requerimiento'));
 app.use('/api/cargos-requerimiento', moduloRequerido('requerimiento'));
+app.use('/api/simulador-dotacion', moduloRequerido('requerimiento'));
+// Sin cache: el desglose por_turno cambia seguido (nuevos registros de
+// requerimiento, marcaciones del día) y una respuesta vieja en caché del
+// navegador puede faltarle campos que se agregaron después.
+app.use('/api/simulador-dotacion', (req, res, next) => { res.set('Cache-Control', 'no-store'); next(); });
 app.use('/api/actualizar', moduloRequerido('actualizacion'));
 app.use('/api/importar', moduloRequerido('carga'));
 app.use('/api/jefe-turno', moduloRequerido('asignacion'));
@@ -1013,6 +1042,26 @@ app.get('/api/horas-extras/export-pdf', async (req, res) => {
   }
 });
 
+// PDF con una sección por trabajador (para imprimir y validar/firmar con
+// cada uno) en vez de la tabla larga de export-pdf.
+app.get('/api/horas-extras/export-pdf-trabajador', async (req, res) => {
+  try {
+    const { desde, hasta, diasSemana, turnos, cd } = req.query;
+    if (!desde || !hasta) return res.status(400).json({ error: 'desde y hasta son requeridos (YYYY-MM-DD)' });
+    const cdsFiltro = await resolverCdsFiltro(req, cd);
+    const buffer = await exportarReporteHorasExtrasPorTrabajadorPdf(pool, {
+      desde, hasta, diasSemana: parseDiasSemanaQuery(diasSemana), turnos: parseDiasSemanaQuery(turnos),
+      cds: cdsFiltro,
+    });
+    res.setHeader('Content-Type', 'application/pdf');
+    res.setHeader('Content-Disposition', `attachment; filename="HorasExtrasPorTrabajador_${desde}_a_${hasta}.pdf"`);
+    res.send(buffer);
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
 // Lista los días/trabajadores que llegaron antes de su horario esperado
 // (candidatos a autorización de hora extra anticipada), con su estado actual.
 app.get('/api/horas-extras/candidatos-autorizacion', async (req, res) => {
@@ -1052,6 +1101,105 @@ app.post('/api/horas-extras/autorizar', moduloRequerido('horasExtras'), async (r
          autorizado_en = EXCLUDED.autorizado_en, observacion = EXCLUDED.observacion`,
       [rut, fecha, autorizado, req.usuario.nombre || req.usuario.usuario, observacion || null]
     );
+    res.json({ ok: true });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ ok: false, error: err.message });
+  }
+});
+
+// --- Horas extras ORDINARIAS (minutos trabajados después de la hora de
+// salida esperada): a diferencia de las anticipadas, sí tienen flujo de
+// solicitud (Jefe de Turno) + aprobación (Jefe de Operaciones o admin). ---
+
+// Lista los días/trabajadores con minutos trabajados después de su horario
+// de salida esperado (candidatos a hora extra ordinaria), con su estado
+// actual de solicitud/aprobación. Visible para quien pueda solicitar O
+// aprobar (no hace falta tener ambos permisos para ver la lista).
+app.get('/api/horas-extras/ordinarias/candidatos', algunModuloRequerido(['horasExtrasSolicitar', 'horasExtrasAprobar']), async (req, res) => {
+  try {
+    const { desde, hasta, cd } = req.query;
+    if (!desde || !hasta) return res.status(400).json({ error: 'desde y hasta son requeridos (YYYY-MM-DD)' });
+    const cdsFiltro = await resolverCdsFiltro(req, cd);
+    const filas = await generarDetalleMarcaciones(pool, { desde, hasta, cds: cdsFiltro }, Infinity);
+
+    const { rows: estadosRows } = await pool.query(
+      `SELECT rut, fecha, estado, solicitado_por, solicitado_en, observacion_solicitud,
+              resuelto_por, resuelto_en, observacion_resolucion
+       FROM horas_extras_ordinarias_autorizacion WHERE fecha BETWEEN $1 AND $2`,
+      [desde, hasta]
+    );
+    const estadoPorClave = new Map(estadosRows.map(r => [`${r.rut}|${r.fecha}`, r]));
+
+    const candidatos = filas
+      .filter(f => f.minutos_extra_final > 0)
+      .map(f => {
+        const info = estadoPorClave.get(`${f.rut}|${f.fecha}`);
+        return {
+          fecha: f.fecha, rut: f.rut, nombre: f.nombre, cargo: f.cargo, turno: f.turno,
+          salida_real: f.salida_mpg, hora_salida_esperada: f.hora_salida_esperada,
+          minutos_extra: f.minutos_extra_final,
+          estado: info?.estado || 'pendiente',
+          solicitado_por: info?.solicitado_por || null,
+          solicitado_en: info?.solicitado_en || null,
+          observacion_solicitud: info?.observacion_solicitud || null,
+          resuelto_por: info?.resuelto_por || null,
+          resuelto_en: info?.resuelto_en || null,
+          observacion_resolucion: info?.observacion_resolucion || null,
+        };
+      })
+      .sort((a, b) => a.fecha.localeCompare(b.fecha) || (a.nombre || '').localeCompare(b.nombre || ''));
+    res.json(candidatos);
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// El Jefe de Turno (u otro rol con el permiso) solicita la autorización de
+// la hora extra ordinaria de un trabajador en una fecha específica.
+app.post('/api/horas-extras/ordinarias/solicitar', moduloRequerido('horasExtrasSolicitar'), async (req, res) => {
+  try {
+    const { rut, fecha, observacion } = req.body;
+    if (!rut || !fecha) return res.status(400).json({ error: 'rut y fecha son requeridos' });
+    await pool.query(
+      `INSERT INTO horas_extras_ordinarias_autorizacion (rut, fecha, estado, solicitado_por, solicitado_en, observacion_solicitud)
+       VALUES ($1,$2,'solicitado',$3,now(),$4)
+       ON CONFLICT (rut, fecha) DO UPDATE SET
+         estado = 'solicitado', solicitado_por = EXCLUDED.solicitado_por,
+         solicitado_en = EXCLUDED.solicitado_en, observacion_solicitud = EXCLUDED.observacion_solicitud`,
+      [rut, fecha, req.usuario.nombre || req.usuario.usuario, observacion || null]
+    );
+    res.json({ ok: true });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ ok: false, error: err.message });
+  }
+});
+
+// El Jefe de Operaciones (u otro rol con el permiso) o un admin aprueba,
+// rechaza, o revierte a pendiente (decision: 'autorizado' | 'rechazado' |
+// 'pendiente') la hora extra ordinaria de un trabajador en una fecha —
+// puede resolverla directamente aunque nunca haya sido solicitada.
+app.post('/api/horas-extras/ordinarias/resolver', moduloRequerido('horasExtrasAprobar'), async (req, res) => {
+  try {
+    const { rut, fecha, decision, observacion } = req.body;
+    const DECISIONES_VALIDAS = ['autorizado', 'rechazado', 'pendiente'];
+    if (!rut || !fecha || !DECISIONES_VALIDAS.includes(decision)) {
+      return res.status(400).json({ error: "rut, fecha y decision ('autorizado'|'rechazado'|'pendiente') son requeridos" });
+    }
+    if (decision === 'pendiente') {
+      await pool.query('DELETE FROM horas_extras_ordinarias_autorizacion WHERE rut = $1 AND fecha = $2', [rut, fecha]);
+    } else {
+      await pool.query(
+        `INSERT INTO horas_extras_ordinarias_autorizacion (rut, fecha, estado, resuelto_por, resuelto_en, observacion_resolucion)
+         VALUES ($1,$2,$3,$4,now(),$5)
+         ON CONFLICT (rut, fecha) DO UPDATE SET
+           estado = EXCLUDED.estado, resuelto_por = EXCLUDED.resuelto_por,
+           resuelto_en = EXCLUDED.resuelto_en, observacion_resolucion = EXCLUDED.observacion_resolucion`,
+        [rut, fecha, decision, req.usuario.nombre || req.usuario.usuario, observacion || null]
+      );
+    }
     res.json({ ok: true });
   } catch (err) {
     console.error(err);
@@ -1100,6 +1248,60 @@ app.get('/api/ausentismo-recurrente', moduloRequerido('dashboard'), async (req, 
   } catch (err) {
     console.error(err);
     res.status(500).json({ error: err.message });
+  }
+});
+
+// --- Informe de análisis con IA (rotación de personal + ausentismo) ---
+// Se genera bajo demanda (botón), recomendado la última semana de cada mes;
+// no hay ningún job automático que llame a la API de IA por su cuenta.
+
+app.get('/api/analisis-ia/historial', moduloRequerido('dashboard'), async (req, res) => {
+  try {
+    const { rows } = await pool.query(
+      'SELECT id, periodo, generado_por, creado_en FROM informes_ia ORDER BY creado_en DESC LIMIT 24'
+    );
+    res.json(rows);
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.get('/api/analisis-ia/historial/:id', moduloRequerido('dashboard'), async (req, res) => {
+  try {
+    const { rows } = await pool.query(
+      'SELECT id, periodo, narrativa, datos, generado_por, creado_en FROM informes_ia WHERE id = $1',
+      [req.params.id]
+    );
+    if (rows.length === 0) return res.status(404).json({ error: 'Informe no encontrado' });
+    res.json(rows[0]);
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.post('/api/analisis-ia/generar', moduloRequerido('dashboard'), async (req, res) => {
+  try {
+    const { mesesAtras, cd } = req.body || {};
+    const cdsFiltro = await resolverCdsFiltro(req, cd);
+    const resultado = await generarInformeIA(pool, {
+      mesesAtras: mesesAtras ? Number(mesesAtras) : 6,
+      cds: cdsFiltro,
+    });
+    const { rows } = await pool.query(
+      `INSERT INTO informes_ia (periodo, narrativa, datos, generado_por) VALUES ($1,$2,$3,$4)
+       RETURNING id, creado_en`,
+      [resultado.periodo, resultado.narrativa, JSON.stringify(resultado.datos), req.usuario.usuario]
+    );
+    res.json({
+      ok: true, id: rows[0].id, periodo: resultado.periodo,
+      narrativa: resultado.narrativa, datos: resultado.datos, creado_en: rows[0].creado_en,
+    });
+  } catch (err) {
+    console.error(err);
+    if (err.sinApiKey) return res.status(400).json({ error: err.message });
+    res.status(500).json({ error: err.message || 'Error al generar el informe con IA' });
   }
 });
 
@@ -1236,6 +1438,62 @@ app.get('/api/requerimiento-dotacion/vigente', async (req, res) => {
   }
 });
 
+// Matriz de TODOS los cargos de un CD de una sola vez: requerido actual,
+// ausentismo histórico, dotación activa y frecuencia de sobredotación real
+// (para no tener que simular cargo por cargo).
+app.get('/api/simulador-dotacion/matriz', async (req, res) => {
+  try {
+    const { cd, dias, cargos } = req.query;
+    if (!cd) return res.status(400).json({ error: 'cd es requerido' });
+    const cdsFiltro = await resolverCdsFiltro(req, cd);
+    if (cdsFiltro && cdsFiltro.length === 0) return res.status(403).json({ error: 'No tienes acceso a este CD' });
+
+    const datos = await calcularMatrizDotacion(pool, {
+      cd, dias: dias ? Number(dias) : undefined,
+      cargos: cargos ? cargos.split(',').map(c => c.trim()).filter(Boolean) : undefined,
+    });
+    res.json(datos);
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Detalle Lunes a Sábado × AM/PM/NOCHE/PLANO de un cargo puntual (se pide al
+// hacer clic en una fila de la matriz, no viene precargado para todos).
+app.get('/api/simulador-dotacion/detalle-dia-turno', async (req, res) => {
+  try {
+    const { cargo, cd, dias } = req.query;
+    if (!cargo || !cd) return res.status(400).json({ error: 'cargo y cd son requeridos' });
+    const cdsFiltro = await resolverCdsFiltro(req, cd);
+    if (cdsFiltro && cdsFiltro.length === 0) return res.status(403).json({ error: 'No tienes acceso a este CD' });
+
+    const datos = await calcularDetalleDiaTurno(pool, { cargo, cd, dias: dias ? Number(dias) : undefined });
+    res.json(datos);
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Análisis de riesgo (sub y sobre-dotación) con IA sobre la matriz que ya
+// armó el usuario en pantalla (incluye lo que haya simulado como "nuevo
+// requerido" en cada fila) — se dispara con un botón, no automático.
+app.post('/api/simulador-dotacion/analisis-ia', async (req, res) => {
+  try {
+    const { cd, filas } = req.body || {};
+    if (!cd || !Array.isArray(filas) || filas.length === 0) {
+      return res.status(400).json({ error: 'cd y filas (arreglo con al menos un cargo) son requeridos' });
+    }
+    const { narrativa } = await generarAnalisisRiesgoDotacion({ cd, filas });
+    res.json({ ok: true, narrativa });
+  } catch (err) {
+    console.error(err);
+    if (err.sinApiKey) return res.status(400).json({ error: err.message });
+    res.status(500).json({ error: err.message || 'Error al generar el análisis con IA' });
+  }
+});
+
 app.post('/api/requerimiento-dotacion', async (req, res) => {
   try {
     const { cargo, turno, cd, cantidad_requerida, vigente_desde, vigente_hasta, observacion } = req.body;
@@ -1367,6 +1625,8 @@ const MODULOS_DISPONIBLES = [
   { key: 'reporte', label: 'Reporte diario' },
   { key: 'nomina', label: 'Cierre de Nómina' },
   { key: 'horasExtras', label: 'Horas Extras' },
+  { key: 'horasExtrasSolicitar', label: 'Horas Extras — Solicitar Ordinarias' },
+  { key: 'horasExtrasAprobar', label: 'Horas Extras — Aprobar Ordinarias' },
   { key: 'asignacion', label: 'Jefe de Turno' },
   { key: 'perfiles', label: 'Perfiles / Áreas' },
   { key: 'fueroMaternal', label: 'Fuero Maternal' },
@@ -1609,6 +1869,61 @@ app.get('/api/jefe-turno', async (req, res) => {
        ORDER BY jefe_turno NULLS LAST, nombre`
     );
     res.json(rows);
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+function etiquetaJefeTurnoExport(valor) {
+  const OPCIONES = {
+    T_RD: 'T_RD (rotativo AM/PM)',
+    T_BV: 'T_BV (rotativo AM/PM)',
+    T_WP: 'T_WP (Noche, fijo)',
+    PLANO: 'Turno Plano (sin jefatura, Lun-Vie)',
+    CG: 'Turno Plano (sin jefatura, Lun-Vie)',
+  };
+  return valor ? (OPCIONES[valor] || valor) : 'Sin asignar';
+}
+
+// Excel con los trabajadores ACTIVOS por CD (universo completo de empleados
+// activos, no solo los que ya tienen jefe de turno asignado) — para análisis
+// de dotación desde la planilla.
+app.get('/api/jefe-turno/export', async (req, res) => {
+  try {
+    const { cd } = req.query;
+    const cdsFiltro = await resolverCdsFiltro(req, cd);
+
+    let sql = `
+      SELECT e.rut, e.nombre, e.apellido_paterno, e.cargo, e.cd, e.centro_costo, jta.jefe_turno
+      FROM empleados e
+      LEFT JOIN jefe_turno_asignacion jta ON jta.rut = e.rut
+      WHERE e.activo = true
+    `;
+    const params = [];
+    if (cdsFiltro) { params.push(cdsFiltro); sql += ` AND e.cd = ANY($${params.length}::text[])`; }
+    sql += ` ORDER BY e.cd NULLS LAST, e.cargo NULLS LAST, e.nombre`;
+
+    const { rows } = await pool.query(sql, params);
+
+    const encabezado = ['RUT', 'Nombre', 'Cargo', 'CD', 'Centro de Costo', 'Jefe de Turno'];
+    const datos = rows.map(r => [
+      r.rut, `${r.nombre || ''} ${r.apellido_paterno || ''}`.trim(), r.cargo || '', r.cd || '',
+      r.centro_costo || '', etiquetaJefeTurnoExport(r.jefe_turno),
+    ]);
+
+    const ws = XLSX.utils.aoa_to_sheet([encabezado, ...datos]);
+    ws['!autofilter'] = { ref: `A1:F${datos.length + 1}` };
+    ws['!views'] = [{ state: 'frozen', ySplit: 1 }];
+    ws['!cols'] = [{ wch: 13 }, { wch: 28 }, { wch: 28 }, { wch: 16 }, { wch: 18 }, { wch: 32 }];
+
+    const wb = XLSX.utils.book_new();
+    XLSX.utils.book_append_sheet(wb, ws, 'Trabajadores Activos');
+    const buffer = XLSX.write(wb, { type: 'buffer', bookType: 'xlsx' });
+
+    res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
+    res.setHeader('Content-Disposition', `attachment; filename="TrabajadoresActivosPorCD_${new Date().toISOString().slice(0, 10)}.xlsx"`);
+    res.send(buffer);
   } catch (err) {
     console.error(err);
     res.status(500).json({ error: err.message });

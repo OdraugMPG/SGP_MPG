@@ -4,6 +4,7 @@ import {
   eliminarRequerimientoDotacion, listarCargosRequerimiento, crearCargoRequerimiento, eliminarCargoRequerimiento,
   crearRequerimientoDotacion, editarRequerimientoDotacion, listarCds,
 } from '../api';
+import MatrizDotacion from './MatrizDotacion';
 
 function hoyISO() {
   return new Date().toISOString().slice(0, 10);
@@ -474,6 +475,7 @@ export default function RequerimientoDotacion() {
         </div>
       </div>
 
+      <MatrizDotacion cargos={cargos} cd={cd} />
       <PanelCargos cargos={cargos} onCambio={cargarCargos} />
       <MatrizRequerimiento cargos={cargos} cd={cd} onGuardado={refrescarTodo} />
       <RegistroHistorico cargos={cargos} cd={cd} onGuardado={refrescarTodo} />

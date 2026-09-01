@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback } from 'react';
+import { useState, useEffect, useCallback, useRef } from 'react';
 import CargaArchivos from './components/CargaArchivos';
 import ActualizacionDiaria from './components/ActualizacionDiaria';
 import TablaResultados from './components/TablaResultados';
@@ -6,6 +6,7 @@ import ReporteDiario from './components/ReporteDiario';
 import CierreNomina from './components/CierreNomina';
 import ReporteHorasExtras from './components/ReporteHorasExtras';
 import AutorizacionHorasExtras from './components/AutorizacionHorasExtras';
+import AutorizacionHorasExtrasOrdinarias from './components/AutorizacionHorasExtrasOrdinarias';
 import AsignacionJefeTurno from './components/AsignacionJefeTurno';
 import PerfilTrabajador from './components/PerfilTrabajador';
 import FueroMaternal from './components/FueroMaternal';
@@ -20,23 +21,48 @@ import RequerimientoDotacion from './components/RequerimientoDotacion';
 import { obtenerToken, obtenerUsuarioActual, cerrarSesion, obtenerMisModulos, listarCds } from './api';
 import './index.css';
 
-const TODAS_LAS_PESTANAS = [
-  { key: 'dashboard', label: 'Dashboard', componente: () => <DashboardAsistencia /> },
-  { key: 'resultados', label: 'Resultados' },
-  { key: 'detalle', label: 'Detalle Marcaciones' },
-  { key: 'reporte', label: 'Reporte diario' },
-  { key: 'nomina', label: 'Cierre de Nómina' },
-  { key: 'horasExtras', label: 'Horas Extras' },
-  { key: 'asignacion', label: 'Jefe de Turno' },
-  { key: 'perfiles', label: 'Perfiles / Áreas' },
-  { key: 'fueroMaternal', label: 'Fuero Maternal' },
-  { key: 'amonestaciones', label: 'Amonestaciones' },
-  { key: 'feriados', label: 'Feriados' },
-  { key: 'requerimiento', label: 'Requerimiento Dotación' },
-  { key: 'ausencias', label: 'Ausencias / Permisos' },
-  { key: 'actualizacion', label: 'Actualización diaria' },
-  { key: 'carga', label: 'Cargar planillas (5)' },
-  { key: 'usuarios', label: 'Usuarios' },
+// Menú del header: "dashboard" queda suelto (es el más usado), el resto se
+// agrupa en desplegables por relación funcional, para no repetir el scroll
+// horizontal de 17 pestañas sueltas. 'horasExtrasOrdinarias' es un caso
+// especial: no es un módulo real, se resuelve más abajo (tieneAccesoOrdinarias).
+const GRUPOS_MENU = [
+  { tipo: 'item', key: 'dashboard', label: 'Dashboard' },
+  {
+    tipo: 'grupo', id: 'asistencia', label: 'Asistencia',
+    items: [
+      { key: 'resultados', label: 'Resultados' },
+      { key: 'detalle', label: 'Detalle Marcaciones' },
+      { key: 'reporte', label: 'Reporte diario' },
+      { key: 'actualizacion', label: 'Actualización diaria' },
+      { key: 'carga', label: 'Cargar planillas (5)' },
+    ],
+  },
+  {
+    tipo: 'grupo', id: 'nomina', label: 'Nómina',
+    items: [
+      { key: 'nomina', label: 'Cierre de Nómina' },
+      { key: 'horasExtras', label: 'Horas Extras' },
+      { key: 'horasExtrasOrdinarias', label: 'Aprobación Horas Extras' },
+    ],
+  },
+  {
+    tipo: 'grupo', id: 'personas', label: 'Personas',
+    items: [
+      { key: 'perfiles', label: 'Perfiles / Áreas' },
+      { key: 'ausencias', label: 'Ausencias / Permisos' },
+      { key: 'fueroMaternal', label: 'Fuero Maternal' },
+      { key: 'amonestaciones', label: 'Amonestaciones' },
+      { key: 'asignacion', label: 'Jefe de Turno' },
+      { key: 'requerimiento', label: 'Requerimiento Dotación' },
+    ],
+  },
+  {
+    tipo: 'grupo', id: 'configuracion', label: 'Configuración',
+    items: [
+      { key: 'feriados', label: 'Feriados' },
+      { key: 'usuarios', label: 'Usuarios' },
+    ],
+  },
 ];
 
 export default function App() {
@@ -46,11 +72,23 @@ export default function App() {
   const [modulosHabilitados, setModulosHabilitados] = useState(null); // null = cargando
   const [cdGlobal, setCdGlobal] = useState('');
   const [cdsDisponibles, setCdsDisponibles] = useState([]);
+  const [grupoAbierto, setGrupoAbierto] = useState(null);
+  const navRef = useRef(null);
 
   useEffect(() => {
     if (!usuario) return;
     listarCds().then(setCdsDisponibles).catch(() => {});
   }, [usuario]);
+
+  // Cierra el desplegable abierto si se hace clic fuera del menú.
+  useEffect(() => {
+    if (!grupoAbierto) return;
+    function alHacerClicFuera(e) {
+      if (navRef.current && !navRef.current.contains(e.target)) setGrupoAbierto(null);
+    }
+    document.addEventListener('mousedown', alHacerClicFuera);
+    return () => document.removeEventListener('mousedown', alHacerClicFuera);
+  }, [grupoAbierto]);
 
   const handleSesionInvalida = useCallback(() => {
     setUsuario(null);
@@ -88,7 +126,18 @@ export default function App() {
     );
   }
 
-  const pestanas = TODAS_LAS_PESTANAS.filter(p => modulosHabilitados.includes(p.key));
+  // "Aprobación Horas Extras" no es un módulo real por sí mismo: se ve si el
+  // usuario puede solicitar O aprobar horas extras ordinarias (no hace falta
+  // el módulo 'horasExtras' completo, para que Jefe de Turno/Jefe de
+  // Operaciones puedan tener solo este acceso puntual).
+  const tieneAccesoOrdinarias = modulosHabilitados.includes('horasExtrasSolicitar') || modulosHabilitados.includes('horasExtrasAprobar');
+  function tieneAccesoA(key) {
+    return key === 'horasExtrasOrdinarias' ? tieneAccesoOrdinarias : modulosHabilitados.includes(key);
+  }
+  // Lista plana de todo lo que el usuario puede ver, sin importar si está
+  // suelto o dentro de un grupo — solo para saber si mostrar el estado
+  // "sin módulos habilitados".
+  const todoLoVisible = GRUPOS_MENU.flatMap(g => g.tipo === 'item' ? [g] : g.items).filter(i => tieneAccesoA(i.key));
 
   return (
     <>
@@ -125,7 +174,7 @@ export default function App() {
         </div>
       </header>
 
-      {pestanas.length === 0 ? (
+      {todoLoVisible.length === 0 ? (
         <main>
           <div className="card">
             <h2>Sin módulos habilitados</h2>
@@ -137,16 +186,50 @@ export default function App() {
         </main>
       ) : (
         <>
-          <nav className="tabs">
-            {pestanas.map(p => (
-              <button
-                key={p.key}
-                className={`tab-btn ${tab === p.key ? 'active' : ''}`}
-                onClick={() => setTab(p.key)}
-              >
-                {p.label}
-              </button>
-            ))}
+          <nav className="tabs" ref={navRef}>
+            {GRUPOS_MENU.map(entrada => {
+              if (entrada.tipo === 'item') {
+                if (!tieneAccesoA(entrada.key)) return null;
+                return (
+                  <button
+                    key={entrada.key}
+                    className={`tab-btn ${tab === entrada.key ? 'active' : ''}`}
+                    onClick={() => { setTab(entrada.key); setGrupoAbierto(null); }}
+                  >
+                    {entrada.label}
+                  </button>
+                );
+              }
+
+              const itemsVisibles = entrada.items.filter(i => tieneAccesoA(i.key));
+              if (itemsVisibles.length === 0) return null;
+              const grupoActivo = itemsVisibles.some(i => i.key === tab);
+              return (
+                <div key={entrada.id} className="tab-dropdown">
+                  <button
+                    type="button"
+                    className={`tab-btn ${grupoActivo ? 'active' : ''}`}
+                    onClick={() => setGrupoAbierto(g => (g === entrada.id ? null : entrada.id))}
+                  >
+                    {entrada.label} <span className="tab-dropdown-caret">▾</span>
+                  </button>
+                  {grupoAbierto === entrada.id && (
+                    <div className="tab-dropdown-menu">
+                      {itemsVisibles.map(i => (
+                        <button
+                          key={i.key}
+                          type="button"
+                          className={`tab-dropdown-item ${tab === i.key ? 'active' : ''}`}
+                          onClick={() => { setTab(i.key); setGrupoAbierto(null); }}
+                        >
+                          {i.label}
+                        </button>
+                      ))}
+                    </div>
+                  )}
+                </div>
+              );
+            })}
           </nav>
 
           <main>
@@ -181,6 +264,15 @@ export default function App() {
                 <div style={{ marginTop: 20 }}>
                   <ReporteHorasExtras cdGlobal={cdGlobal} />
                 </div>
+              </div>
+            )}
+            {tieneAccesoOrdinarias && (
+              <div style={{ display: tab === 'horasExtrasOrdinarias' ? 'block' : 'none' }}>
+                <AutorizacionHorasExtrasOrdinarias
+                  cdGlobal={cdGlobal}
+                  puedeSolicitar={modulosHabilitados.includes('horasExtrasSolicitar')}
+                  puedeAprobar={modulosHabilitados.includes('horasExtrasAprobar')}
+                />
               </div>
             )}
             {modulosHabilitados.includes('asignacion') && (

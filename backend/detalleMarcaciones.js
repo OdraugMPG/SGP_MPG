@@ -148,14 +148,24 @@ async function generarDetalleMarcaciones(pool, filtros, limite = 1000) {
   const { rows: horarioPlanoRows } = await pool.query('SELECT dia, hora_entrada, hora_salida FROM horario_plano');
   const horarioPlanoMap = new Map(horarioPlanoRows.map(r => [r.dia, r]));
 
-  // Autorizaciones de horas extras (rut+fecha) — solo si está autorizado se
-  // permite contar como hora extra el tiempo trabajado ANTES del horario de
-  // entrada esperado. Sin autorización, esos minutos anticipados no se pagan.
+  // Autorizaciones de horas extras ANTICIPADAS (rut+fecha) — solo si está
+  // autorizado se permite contar como hora extra el tiempo trabajado ANTES
+  // del horario de entrada esperado. Sin autorización, esos minutos
+  // anticipados no se pagan.
   const { rows: autorizacionRows } = await pool.query(
     'SELECT rut, fecha FROM horas_extras_autorizacion WHERE fecha BETWEEN $1 AND $2 AND autorizado = true',
     [desdeExtendido, hastaExtendido]
   );
   const autorizadoPorClave = new Set(autorizacionRows.map(r => `${r.rut}|${r.fecha}`));
+
+  // Autorizaciones de horas extras ORDINARIAS (rut+fecha) — igual que las
+  // anticipadas, solo se pagan si están autorizadas (flujo de solicitud del
+  // Jefe de Turno + aprobación del Jefe de Operaciones/admin).
+  const { rows: ordinariaRows } = await pool.query(
+    "SELECT rut, fecha FROM horas_extras_ordinarias_autorizacion WHERE fecha BETWEEN $1 AND $2 AND estado = 'autorizado'",
+    [desdeExtendido, hastaExtendido]
+  );
+  const ordinariaAutorizadaPorClave = new Set(ordinariaRows.map(r => `${r.rut}|${r.fecha}`));
 
   // Jornada esperada (en minutos) para el turno Plano, según día de la semana.
 
@@ -211,20 +221,27 @@ async function generarDetalleMarcaciones(pool, filtros, limite = 1000) {
       horaSalidaEsperada = salidaEsperadaPorClave.get(`${sem}|${codigoResuelto}|${dia}`) ?? null;
     }
 
-    // Horas extras = solo minutos trabajados DESPUÉS de la hora de salida
-    // esperada, más los minutos "anticipados" (entrada antes de lo
-    // esperado) SI están autorizados — y el anticipado solo aplica para
-    // turno PM o Noche (para AM no corresponde pedir entrada anticipada).
+    // Horas extras = minutos trabajados DESPUÉS de la hora de salida
+    // esperada ("ordinarias") SI están autorizadas, más los minutos
+    // "anticipados" (entrada antes de lo esperado) SI están autorizados — y
+    // el anticipado solo aplica para turno PM o Noche (para AM no
+    // corresponde pedir entrada anticipada).
     const anticipadoAutorizado = autorizadoPorClave.has(`${rutFila}|${fecha}`);
     const permiteAnticipado = tipoTurno === 'PM' || tipoTurno === 'NOCHE';
     const minAnticipadoMPG = (permiteAnticipado && anticipadoAutorizado) ? minutosAnticipados(entradaTalana, horaEntradaEsperada) : 0;
     const minAnticipadoCencosud = (permiteAnticipado && anticipadoAutorizado) ? minutosAnticipados(entradaCencosud, horaEntradaEsperada) : 0;
 
+    const ordinariaAutorizada = ordinariaAutorizadaPorClave.has(`${rutFila}|${fecha}`);
+    const minExtraFinalMPGCrudo = minutosExtraFinal(salidaTalana, horaSalidaEsperada);
+    const minExtraFinalCencosudCrudo = minutosExtraFinal(salidaCencosud, horaSalidaEsperada);
+    const minExtraFinalMPG = ordinariaAutorizada ? minExtraFinalMPGCrudo : 0;
+    const minExtraFinalCencosud = ordinariaAutorizada ? minExtraFinalCencosudCrudo : 0;
+
     const horasExtrasMPG = horasTrabajadasMPG !== null
-      ? calcularHorasExtrasDesdeMinutos(minutosExtraFinal(salidaTalana, horaSalidaEsperada) + minAnticipadoMPG)
+      ? calcularHorasExtrasDesdeMinutos(minExtraFinalMPG + minAnticipadoMPG)
       : null;
     const horasExtrasCencosud = horasTrabajadasCencosud !== null
-      ? calcularHorasExtrasDesdeMinutos(minutosExtraFinal(salidaCencosud, horaSalidaEsperada) + minAnticipadoCencosud)
+      ? calcularHorasExtrasDesdeMinutos(minExtraFinalCencosud + minAnticipadoCencosud)
       : null;
 
     const turnoLabel = normalizarTurnoLabel(cencosud?.turno, codigoAsignado, fecha, rotacionBasePorClave);
@@ -255,8 +272,11 @@ async function generarDetalleMarcaciones(pool, filtros, limite = 1000) {
       diferencia_salida_min: formatoMinutos(diferenciaSalidaMin),
       diferencia_horas_trabajadas: formatoMinutos(diferenciaHorasTrabajadasMin),
       hora_entrada_esperada: horaEntradaEsperada,
+      hora_salida_esperada: horaSalidaEsperada,
       minutos_anticipados: permiteAnticipado ? minutosAnticipados(entradaTalana, horaEntradaEsperada) : 0,
       anticipado_autorizado: anticipadoAutorizado,
+      minutos_extra_final: minExtraFinalMPGCrudo,
+      ordinaria_autorizada: ordinariaAutorizada,
     });
   }
 
