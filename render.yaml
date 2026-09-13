@@ -1,0 +1,57 @@
+# Blueprint de Render para SGP — crea juntos, ya conectados entre sí, el
+# backend (Web Service) y su base de datos Postgres. Deploy: en el dashboard
+# de Render, "New" -> "Blueprint", elegir el repo OdraugMPG/SGP_MPG y esta
+# rama (main). Las variables marcadas "sync: false" las pide Render durante
+# ese asistente — no quedan guardadas en este archivo ni en el repo.
+databases:
+  - name: sgp-db
+    plan: free
+    region: oregon
+    postgresMajorVersion: "18"
+
+services:
+  - type: web
+    name: sgp-backend
+    runtime: node
+    plan: free
+    region: oregon
+    rootDir: backend
+    buildCommand: npm install
+    startCommand: node index.js
+    envVars:
+      - key: PGHOST
+        fromDatabase:
+          name: sgp-db
+          property: host
+      - key: PGPORT
+        fromDatabase:
+          name: sgp-db
+          property: port
+      - key: PGDATABASE
+        fromDatabase:
+          name: sgp-db
+          property: database
+      - key: PGUSER
+        fromDatabase:
+          name: sgp-db
+          property: user
+      - key: PGPASSWORD
+        fromDatabase:
+          name: sgp-db
+          property: password
+      - key: PGSSL
+        value: "true"
+      - key: JWT_SECRET
+        generateValue: true
+      # Usuario admin inicial — solo se crea la primera vez que arranca el
+      # backend contra una base vacía (ver initDb en backend/db.js).
+      - key: ADMIN_USER
+        sync: false
+      - key: ADMIN_PASSWORD
+        sync: false
+      - key: ADMIN_NOMBRE
+        sync: false
+      # Opcional — sin esto el botón "Generar informe con IA" del Dashboard
+      # avisa que falta la key, el resto del sistema funciona igual.
+      - key: GEMINI_API_KEY
+        sync: false

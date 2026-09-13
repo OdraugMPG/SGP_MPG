@@ -44,12 +44,18 @@ const app = express();
 app.use(cors());
 app.use(express.json());
 
-const upload = multer({ dest: path.join(__dirname, 'uploads'), limits: { fileSize: 10 * 1024 * 1024 } });
+// uploads/ está en .gitignore (son archivos temporales) — en un despliegue
+// nuevo (Render, u otra máquina) la carpeta no existe hasta que Multer
+// intenta escribir en ella, y a diferencia de mkdir, Multer no la crea sola.
+const UPLOADS_DIR = path.join(__dirname, 'uploads');
+fs.mkdirSync(UPLOADS_DIR, { recursive: true });
+
+const upload = multer({ dest: UPLOADS_DIR, limits: { fileSize: 10 * 1024 * 1024 } });
 
 // Multer dedicado para la foto de marcación móvil: solo imágenes, límite
 // más chico (una selfie no necesita 10MB).
 const uploadFotoMovil = multer({
-  dest: path.join(__dirname, 'uploads'),
+  dest: UPLOADS_DIR,
   limits: { fileSize: 4 * 1024 * 1024 },
   fileFilter: (req, file, cb) => cb(null, file.mimetype.startsWith('image/')),
 });
