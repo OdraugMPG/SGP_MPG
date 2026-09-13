@@ -4,7 +4,7 @@ const { diaDeSemana, semanaISO, resolverJefeTurno, determinarTipoTurno, construi
 // Sigla que se muestra en el Dashboard para los días posteriores a la fecha
 // de término, mientras el trabajador sigue "activo" por procesamiento del
 // mes en curso (ver empleados.motivo_termino).
-const CODIGO_MOTIVO_TERMINO = { R: 'Rnv', Des: 'Dsv', CcTo: 'CcTo' };
+const CODIGO_MOTIVO_TERMINO = { R: 'Rnv', Des: 'Dsv', Des160: 'D160', CcTo: 'CcTo' };
 
 function etiquetaTurno(tipoTurno) {
   if (tipoTurno === 'NOCHE') return 'Noche';
@@ -28,7 +28,7 @@ async function calcularMatrizAsistencia(pool, filtros) {
     fechas.push(d.toISOString().slice(0, 10));
   }
 
-  let sqlEmp = 'SELECT rut, nombre, apellido_paterno, cargo, centro_costo, cd, motivo_termino, fecha_termino FROM empleados WHERE activo = true';
+  let sqlEmp = 'SELECT rut, nombre, apellido_paterno, cargo, centro_costo, cd, motivo_termino, fecha_termino, fecha_ingreso FROM empleados WHERE activo = true';
   const paramsEmp = [];
   if (area) { paramsEmp.push(area); sqlEmp += ` AND centro_costo = $${paramsEmp.length}`; }
   if (cds) { paramsEmp.push(cds); sqlEmp += ` AND cd = ANY($${paramsEmp.length}::text[])`; }
@@ -93,6 +93,17 @@ async function calcularMatrizAsistencia(pool, filtros) {
       }
       const r = resultadoPorClave.get(clave);
       const tieneMarca = !!(r && (r.marco_talana || r.marco_cencosud));
+
+      // Antes de la fecha de ingreso (o de reingreso, si fue reactivado) la
+      // persona no tenía contrato — sin marca real ese día, no corresponde
+      // mostrarlo como "Ausente" ni como día libre/feriado (no le aplica un
+      // descanso de un turno al que todavía no estaba asignado), sino como
+      // fuera de dotación.
+      if (!tieneMarca && emp.fecha_ingreso && fecha < emp.fecha_ingreso) {
+        estados[fecha] = { codigo: 'SC', categoria: 'termino' };
+        continue;
+      }
+
       const motivo = motivoDiaLibre(codigoJefeTurno, fecha);
       if (motivo === 'feriado') {
         estados[fecha] = tieneMarca

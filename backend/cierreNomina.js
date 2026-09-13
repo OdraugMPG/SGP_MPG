@@ -108,4 +108,4 @@ async function exportarCierreNominaXlsx(pool, filtros) {
   return XLSX.write(wb, { type: 'buffer', bookType: 'xlsx' });
 }
 
-module.exports = { calcularCierreNomina, exportarCierreNominaXlsx };
+module.exports = { calcularCierreNomina, exportarCierreNominaXlsx, horasFormatoAMinutos, minutosAFormato };

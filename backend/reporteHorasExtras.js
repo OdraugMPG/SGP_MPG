@@ -271,5 +271,5 @@ async function exportarReporteHorasExtrasPorTrabajadorPdf(pool, filtros) {
 
 module.exports = {
   calcularReporteHorasExtras, exportarReporteHorasExtrasXlsx, exportarReporteHorasExtrasPdf,
-  exportarReporteHorasExtrasPorTrabajadorPdf,
+  exportarReporteHorasExtrasPorTrabajadorPdf, horasFormatoAMinutos,
 };

@@ -249,4 +249,4 @@ async function calcularResultadosInterno(pool) {
   }
 }
 
-module.exports = { calcularResultados };
+module.exports = { calcularResultados, horaAMinutos, resolverHora };

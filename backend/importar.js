@@ -539,15 +539,32 @@ async function activarEmpleadosDesdeArchivo(pool, path) {
   }
   ruts = [...new Set(ruts.filter(Boolean))];
 
+  // Quiénes estaban inactivos y quedan activos con este archivo: a esos se
+  // les actualiza fecha_ingreso a hoy, para que el Dashboard de Asistencia
+  // no los marque "Ausente" en los días previos a esta reactivación (no
+  // tienen ninguna marca real esos días porque no estaban trabajando). No
+  // se toca fecha_ingreso de quien ya estaba activo ni de quien queda
+  // inactivo — solo de quien realmente cruza de inactivo a activo acá.
+  const { rows: reactivandose } = await pool.query(
+    'SELECT rut FROM empleados WHERE activo = false AND rut = ANY($1::text[])',
+    [ruts]
+  );
+  const rutsReactivados = reactivandose.map(r => r.rut);
+
   const { rows: resultado } = await pool.query(
     `UPDATE empleados SET activo = (rut = ANY($1::text[])) RETURNING rut, activo`,
     [ruts]
   );
 
+  if (rutsReactivados.length > 0) {
+    const hoy = new Date().toISOString().slice(0, 10);
+    await pool.query('UPDATE empleados SET fecha_ingreso = $1 WHERE rut = ANY($2::text[])', [hoy, rutsReactivados]);
+  }
+
   const activados = resultado.filter(r => r.activo).length;
   const desactivados = resultado.filter(r => !r.activo).length;
 
-  return { ruts_en_archivo: ruts.length, activados, desactivados, total: resultado.length };
+  return { ruts_en_archivo: ruts.length, activados, desactivados, total: resultado.length, reactivados: rutsReactivados.length };
 }
 
 // Actualiza el área (centro de costo) de cada trabajador según un archivo con

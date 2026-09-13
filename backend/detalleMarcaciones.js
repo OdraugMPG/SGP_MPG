@@ -340,4 +340,8 @@ async function exportarDetalleMarcacionesXlsx(pool, filtros) {
   return XLSX.write(wb, { type: 'buffer', bookType: 'xlsx' });
 }
 
-module.exports = { generarDetalleMarcaciones, exportarDetalleMarcacionesXlsx };
+module.exports = {
+  generarDetalleMarcaciones, exportarDetalleMarcacionesXlsx,
+  calcularHorasExtrasDesdeMinutos, minutosExtraFinal, minutosAnticipados,
+  calcularHorasTrabajadas, formatoHoras, formatoMinutos, normalizarTurnoLabel,
+};

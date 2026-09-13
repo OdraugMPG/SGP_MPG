@@ -24,13 +24,20 @@ const {
   calcularReporteHorasExtras, exportarReporteHorasExtrasXlsx, exportarReporteHorasExtrasPdf,
   exportarReporteHorasExtrasPorTrabajadorPdf,
 } = require('./reporteHorasExtras');
-const { calcularIndicadores, exportarReporteDesvinculacionXlsx, calcularSerieCumplimiento, calcularPresentismoHistorico, CARGOS_DASHBOARD } = require('./indicadores');
+const { calcularIndicadores, exportarReporteDesvinculacionXlsx, calcularSerieCumplimiento, calcularAusentismoPorTipoDiario, calcularPresentismoHistorico, CARGOS_DASHBOARD } = require('./indicadores');
+const { calcularResumenAsistenciaArea } = require('./resumenAsistenciaArea');
 const { calcularMatrizAsistencia, exportarMatrizAsistenciaXlsx } = require('./dashboardAsistencia');
 const { calcularMatrizDotacion, calcularDetalleDiaTurno } = require('./simuladorDotacion');
 const { generarAnalisisRiesgoDotacion } = require('./analisisRiesgoDotacion');
 const { DIAS_FALLECIMIENTO, calcularFechaFinFallecimiento } = require('./permisoFallecimiento');
 const { semanaISO, diaDeSemana, resolverJefeTurno, sumarDias, determinarTipoTurno, contratoDesdeRazonSocial, tipoTurnoDesdeHoraEntrada } = require('./importar');
 const { login, requireAuth, requireAdmin } = require('./auth');
+const { loginTrabajador, requireSoloTrabajador, cambiarPinPropio, asignarPin } = require('./authMovil');
+const {
+  registrarMarcacion, listarMarcacionesPropias, listarCdsMovil, crearCdMovil,
+  actualizarCdMovil, eliminarCdMovil, listarTrabajadoresConCredencial, generarReporteMovil, obtenerFotoMarcacion,
+} = require('./marcacionMovil');
+const { parseAnticiposExcel, validarAnticipos, exportarAnticiposXlsx } = require('./anticipos');
 const bcrypt = require('bcryptjs');
 
 const app = express();
@@ -38,6 +45,14 @@ app.use(cors());
 app.use(express.json());
 
 const upload = multer({ dest: path.join(__dirname, 'uploads'), limits: { fileSize: 10 * 1024 * 1024 } });
+
+// Multer dedicado para la foto de marcación móvil: solo imágenes, límite
+// más chico (una selfie no necesita 10MB).
+const uploadFotoMovil = multer({
+  dest: path.join(__dirname, 'uploads'),
+  limits: { fileSize: 4 * 1024 * 1024 },
+  fileFilter: (req, file, cb) => cb(null, file.mimetype.startsWith('image/')),
+});
 
 let pool; // se inicializa al arrancar (ver bottom del archivo)
 
@@ -51,6 +66,22 @@ app.post('/api/auth/login', async (req, res) => {
     const { usuario, password } = req.body;
     if (!usuario || !password) return res.status(400).json({ error: 'Usuario y contraseña son requeridos' });
     const resultado = await login(pool, usuario, password);
+    if (!resultado.ok) return res.status(401).json({ error: resultado.error });
+    res.json(resultado);
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Ruta pública: login de trabajador (RUT + PIN) para marcación móvil.
+// Separada del login de staff (/api/auth/login): distinta tabla de
+// credenciales y distinto payload de JWT (sin 'rol').
+app.post('/api/movil/auth/login', async (req, res) => {
+  try {
+    const { rut, pin } = req.body;
+    if (!rut || !pin) return res.status(400).json({ error: 'RUT y PIN son requeridos' });
+    const resultado = await loginTrabajador(pool, rut, pin);
     if (!resultado.ok) return res.status(401).json({ error: resultado.error });
     res.json(resultado);
   } catch (err) {
@@ -143,7 +174,204 @@ app.use('/api/simulador-dotacion', (req, res, next) => { res.set('Cache-Control'
 app.use('/api/actualizar', moduloRequerido('actualizacion'));
 app.use('/api/importar', moduloRequerido('carga'));
 app.use('/api/jefe-turno', moduloRequerido('asignacion'));
+app.use('/api/anticipos', moduloRequerido('anticipos'));
 
+// Marcación móvil: '/mi' es para el trabajador (login con RUT+PIN propio,
+// no el token de staff), '/admin' es para RRHH (login normal + módulo
+// 'marcacionMovil'). requireSoloTrabajador ya rechaza un token de staff (sin
+// 'tipo'); acá se agrega el chequeo inverso de forma explícita, como defensa
+// en profundidad, para que un token de trabajador nunca llegue a evaluarse
+// contra moduloRequerido (que lo rechazaría igual al no tener 'rol', pero
+// así queda escrito el porqué en vez de depender de un efecto colateral).
+app.use('/api/movil/mi', requireSoloTrabajador);
+app.use('/api/movil/admin', (req, res, next) => {
+  if (req.usuario.tipo === 'trabajador') {
+    return res.status(403).json({ error: 'Esta ruta es solo para personal administrativo' });
+  }
+  next();
+}, moduloRequerido('marcacionMovil'));
+
+// --- Marcación móvil: trabajador ---
+
+app.put('/api/movil/mi/pin', async (req, res) => {
+  try {
+    const { pinActual, pinNuevo } = req.body;
+    if (!pinActual || !pinNuevo) return res.status(400).json({ error: 'pinActual y pinNuevo son requeridos' });
+    const resultado = await cambiarPinPropio(pool, req.trabajador.rut, pinActual, pinNuevo);
+    if (!resultado.ok) return res.status(400).json({ error: resultado.error });
+    res.json(resultado);
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.post('/api/movil/mi/marcaciones', uploadFotoMovil.single('foto'), async (req, res) => {
+  try {
+    const { tipo } = req.body;
+    const lat = Number(req.body.lat);
+    const lng = Number(req.body.lng);
+
+    let fotoBuffer = null;
+    let fotoMime = null;
+    if (req.file) {
+      fotoBuffer = fs.readFileSync(req.file.path);
+      fotoMime = req.file.mimetype;
+      fs.unlink(req.file.path, () => {}); // limpia el archivo temporal, ya quedó en la base
+    }
+
+    const resultado = await registrarMarcacion(pool, { rut: req.trabajador.rut, tipo, lat, lng, fotoBuffer, fotoMime });
+    if (!resultado.ok) return res.status(resultado.status || 400).json(resultado);
+    res.json(resultado);
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.get('/api/movil/mi/marcaciones', async (req, res) => {
+  try {
+    const { desde, hasta } = req.query;
+    if (!desde || !hasta) return res.status(400).json({ error: 'desde y hasta son requeridos' });
+    const filas = await listarMarcacionesPropias(pool, req.trabajador.rut, desde, hasta);
+    res.json(filas);
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// --- Marcación móvil: administración (RRHH) ---
+
+app.get('/api/movil/admin/cds', async (req, res) => {
+  try {
+    res.json(await listarCdsMovil(pool));
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.post('/api/movil/admin/cds', async (req, res) => {
+  try {
+    const { nombre, lat, lng, radio_metros } = req.body;
+    if (!nombre || typeof lat !== 'number' || typeof lng !== 'number') {
+      return res.status(400).json({ error: 'nombre, lat y lng son requeridos' });
+    }
+    const cd = await crearCdMovil(pool, { nombre, lat, lng, radio_metros, adminNombre: req.usuario.nombre });
+    res.json(cd);
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.put('/api/movil/admin/cds/:nombre', async (req, res) => {
+  try {
+    const cd = await actualizarCdMovil(pool, req.params.nombre, req.body);
+    if (!cd) return res.status(404).json({ error: 'CD no encontrado' });
+    res.json(cd);
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.delete('/api/movil/admin/cds/:nombre', async (req, res) => {
+  try {
+    const eliminado = await eliminarCdMovil(pool, req.params.nombre);
+    if (!eliminado) return res.status(404).json({ error: 'CD no encontrado' });
+    res.json({ ok: true });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.get('/api/movil/admin/trabajadores', async (req, res) => {
+  try {
+    res.json(await listarTrabajadoresConCredencial(pool));
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.post('/api/movil/admin/trabajadores/:rut/pin', async (req, res) => {
+  try {
+    const { pin } = req.body;
+    if (!pin) return res.status(400).json({ error: 'pin es requerido' });
+    const resultado = await asignarPin(pool, req.params.rut, pin, req.usuario.nombre);
+    if (!resultado.ok) return res.status(400).json({ error: resultado.error });
+    res.json(resultado);
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.get('/api/movil/admin/reporte', async (req, res) => {
+  try {
+    const { desde, hasta, rut, cd, soloFueraRadio } = req.query;
+    if (!desde || !hasta) return res.status(400).json({ error: 'desde y hasta son requeridos' });
+    const filas = await generarReporteMovil(pool, { desde, hasta, rut, cd, soloFueraRadio: soloFueraRadio === 'true' });
+    res.json(filas);
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.get('/api/movil/admin/marcaciones/:id/foto', async (req, res) => {
+  try {
+    const foto = await obtenerFotoMarcacion(pool, req.params.id);
+    if (!foto || !foto.foto) return res.status(404).json({ error: 'Sin foto para esta marcación' });
+    res.set('Content-Type', foto.foto_mime || 'image/jpeg');
+    res.send(foto.foto);
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// --- Anticipos de sueldo ---
+// Sin persistencia: se sube el Excel, se valida contra faltas injustificadas
+// del mes en curso, y se devuelve el resultado o el reporte descargable —
+// no queda nada guardado en la base entre una carga y otra.
+
+app.post('/api/anticipos/validar', upload.single('archivo'), async (req, res) => {
+  try {
+    if (!req.file) return res.status(400).json({ error: 'Falta el archivo Excel' });
+    const filas = parseAnticiposExcel(req.file.path);
+    fs.unlink(req.file.path, () => {});
+    if (filas.length === 0) {
+      return res.status(400).json({ error: 'El archivo no tiene filas válidas — revisa que tenga columnas RUT, Nombre, Cargo y Monto' });
+    }
+    const validados = await validarAnticipos(pool, filas);
+    res.json({ ok: true, filas: validados });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ ok: false, error: err.message });
+  }
+});
+
+app.post('/api/anticipos/exportar', upload.single('archivo'), async (req, res) => {
+  try {
+    if (!req.file) return res.status(400).json({ error: 'Falta el archivo Excel' });
+    const filas = parseAnticiposExcel(req.file.path);
+    fs.unlink(req.file.path, () => {});
+    if (filas.length === 0) {
+      return res.status(400).json({ error: 'El archivo no tiene filas válidas — revisa que tenga columnas RUT, Nombre, Cargo y Monto' });
+    }
+    const buffer = await exportarAnticiposXlsx(pool, filas);
+    res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
+    res.setHeader('Content-Disposition', `attachment; filename="ValidacionAnticipos_${new Date().toISOString().slice(0, 10)}.xlsx"`);
+    res.send(buffer);
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ ok: false, error: err.message });
+  }
+});
 
 app.post('/api/importar', upload.fields([
   { name: 'maestro', maxCount: 1 },
@@ -1332,6 +1560,32 @@ app.get('/api/indicadores/serie-cumplimiento', async (req, res) => {
   }
 });
 
+app.get('/api/indicadores/resumen-area', async (req, res) => {
+  try {
+    const { desde, hasta, cd } = req.query;
+    if (!desde || !hasta) return res.status(400).json({ error: 'desde y hasta son requeridos' });
+    const cdsFiltro = await resolverCdsFiltro(req, cd);
+    const datos = await calcularResumenAsistenciaArea(pool, { desde, hasta, cds: cdsFiltro });
+    res.json(datos);
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.get('/api/indicadores/ausentismo-diario', async (req, res) => {
+  try {
+    const { desde, hasta, cd } = req.query;
+    if (!desde || !hasta) return res.status(400).json({ error: 'desde y hasta son requeridos' });
+    const cdsFiltro = await resolverCdsFiltro(req, cd);
+    const datos = await calcularAusentismoPorTipoDiario(pool, { desde, hasta, cds: cdsFiltro });
+    res.json(datos);
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
 app.get('/api/indicadores/cargos-dashboard', (req, res) => {
   res.json(CARGOS_DASHBOARD);
 });
@@ -1637,6 +1891,8 @@ const MODULOS_DISPONIBLES = [
   { key: 'actualizacion', label: 'Actualización diaria' },
   { key: 'carga', label: 'Cargar planillas' },
   { key: 'usuarios', label: 'Usuarios' },
+  { key: 'marcacionMovil', label: 'Marcación Móvil (Piloto)' },
+  { key: 'anticipos', label: 'Anticipos de Sueldo' },
 ];
 
 app.get('/api/roles/modulos-disponibles', (req, res) => {
@@ -1838,7 +2094,12 @@ app.get('/api/empleados', async (req, res) => {
     const { q, cd } = req.query;
     if (!q || q.trim().length < 2) return res.json([]);
     const cdsFiltro = await resolverCdsFiltro(req, cd);
-    const like = `%${q.trim()}%`;
+    // e.rut se guarda sin puntos (ver limpiarRut en importar.js) — si se
+    // busca pegando un RUT con el formato chileno normal (con puntos), el
+    // ILIKE nunca calzaba contra el valor guardado y la búsqueda no
+    // mostraba nada. Los nombres nunca llevan puntos, así que sacarlos acá
+    // no afecta la búsqueda por nombre.
+    const like = `%${q.trim().replace(/\./g, '')}%`;
     let sql = `SELECT e.rut, e.nombre, e.apellido_paterno, e.apellido_materno, e.cargo, e.centro_costo,
               e.empresa, e.activo, e.motivo_inactivo, e.motivo_termino, e.fecha_termino, e.tipo_contrato, e.cd, e.direccion, e.comuna,
               a.jefe_turno
@@ -2359,16 +2620,20 @@ app.delete('/api/areas/:nombre', moduloRequerido('perfiles'), async (req, res) =
 // Crear un trabajador nuevo (para casos que aún no están en el Excel maestro)
 app.post('/api/empleados', moduloRequerido('perfiles'), async (req, res) => {
   try {
-    const { rut, nombre, apellido_paterno, apellido_materno, cargo, centro_costo } = req.body;
+    const { rut, nombre, apellido_paterno, apellido_materno, cargo, centro_costo, fecha_ingreso } = req.body;
     if (!rut || !nombre) return res.status(400).json({ error: 'rut y nombre son requeridos' });
 
     const { rows: existe } = await pool.query('SELECT rut FROM empleados WHERE rut = $1', [rut]);
     if (existe.length > 0) return res.status(409).json({ error: 'Ya existe un trabajador con ese RUT' });
 
+    // fecha_ingreso queda registrada desde la creación para que el Dashboard
+    // de Asistencia no marque "Ausente" los días previos a que la persona
+    // realmente empezara a trabajar (sin esto, quedaba NULL y el día de
+    // hoy hacia atrás se veía todo como ausentismo).
     await pool.query(
-      `INSERT INTO empleados (rut, nombre, apellido_paterno, apellido_materno, cargo, centro_costo, empresa)
-       VALUES ($1,$2,$3,$4,$5,$6,'MANPOWER')`,
-      [rut, nombre, apellido_paterno || '', apellido_materno || '', cargo || '', centro_costo || null]
+      `INSERT INTO empleados (rut, nombre, apellido_paterno, apellido_materno, cargo, centro_costo, empresa, fecha_ingreso)
+       VALUES ($1,$2,$3,$4,$5,$6,'MANPOWER',$7)`,
+      [rut, nombre, apellido_paterno || '', apellido_materno || '', cargo || '', centro_costo || null, fecha_ingreso || new Date().toISOString().slice(0, 10)]
     );
     res.json({ ok: true });
   } catch (err) {
@@ -2427,9 +2692,9 @@ app.post('/api/empleados/direccion-masivo', moduloRequerido('perfiles'), upload.
 // Editar el perfil de un trabajador existente (cargo, área/centro de costo, nombre)
 app.put('/api/empleados/:rut', moduloRequerido('perfiles'), async (req, res) => {
   try {
-    const { nombre, apellido_paterno, apellido_materno, cargo, centro_costo, estado, fecha_termino, motivo_inactivo, tipo_contrato, direccion, comuna } = req.body;
+    const { nombre, apellido_paterno, apellido_materno, cargo, centro_costo, estado, fecha_termino, fecha_ingreso, motivo_inactivo, tipo_contrato, direccion, comuna } = req.body;
     const { rows: existe } = await pool.query(
-      'SELECT rut, activo, motivo_termino, fecha_termino, motivo_inactivo FROM empleados WHERE rut = $1',
+      'SELECT rut, activo, motivo_termino, fecha_termino, fecha_ingreso, motivo_inactivo FROM empleados WHERE rut = $1',
       [req.params.rut]
     );
     if (existe.length === 0) return res.status(404).json({ error: 'Trabajador no encontrado' });
@@ -2440,25 +2705,35 @@ app.put('/api/empleados/:rut', moduloRequerido('perfiles'), async (req, res) => 
     let activoNuevo = actual.activo;
     let motivoTerminoNuevo = actual.motivo_termino;
     let fechaTerminoNuevo = actual.fecha_termino;
+    let fechaIngresoNuevo = actual.fecha_ingreso;
     let motivoInactivoNuevo = motivo_inactivo !== undefined ? motivo_inactivo : actual.motivo_inactivo;
 
     if (estado === 'activo') {
+      // Reactivación real (estaba inactivo en la base, más allá de qué
+      // mostrara el select): se actualiza fecha_ingreso a la fecha de
+      // reingreso indicada, para que el Dashboard de Asistencia no marque
+      // "Ausente" los días entre la baja anterior y el reingreso (no hay
+      // ninguna marca real esos días porque la persona no trabajaba).
+      if (actual.activo === false && fecha_ingreso) {
+        fechaIngresoNuevo = fecha_ingreso;
+      }
       activoNuevo = true;
       motivoTerminoNuevo = null;
       fechaTerminoNuevo = null;
       motivoInactivoNuevo = null;
-    } else if (estado === 'R' || estado === 'Des' || estado === 'CcTo') {
+    } else if (estado === 'R' || estado === 'Des' || estado === 'Des160' || estado === 'CcTo') {
       if (!fecha_termino) {
         return res.status(400).json({ error: 'Debes indicar la fecha de renuncia/desvinculación/culminación' });
       }
       // El fuero maternal (Art. 201 CT) protege contra la desvinculación por
       // parte de la empresa sin autorización judicial previa — no aplica a
       // la renuncia voluntaria de la propia trabajadora, así que solo se
-      // bloquea "Des" y "CcTo" (la culminación de un contrato a plazo fijo
-      // tampoco puede aplicarse durante el fuero, según jurisprudencia
-      // mayoritaria). Se puede saltar el bloqueo únicamente si se confirma
-      // explícitamente contar con la autorización judicial (desafuero).
-      if (estado === 'Des' || estado === 'CcTo') {
+      // bloquea "Des", "Des160" y "CcTo" (la culminación de un contrato a
+      // plazo fijo tampoco puede aplicarse durante el fuero, según
+      // jurisprudencia mayoritaria). Se puede saltar el bloqueo únicamente
+      // si se confirma explícitamente contar con la autorización judicial
+      // (desafuero).
+      if (estado === 'Des' || estado === 'Des160' || estado === 'CcTo') {
         const fuero = await fueroVigente(pool, req.params.rut, fecha_termino);
         if (fuero && !req.body.confirmarDesafuero) {
           return res.status(400).json({
@@ -2490,9 +2765,10 @@ app.put('/api/empleados/:rut', moduloRequerido('perfiles'), async (req, res) => 
          motivo_inactivo = $9,
          tipo_contrato = COALESCE($10, tipo_contrato),
          direccion = COALESCE($11, direccion),
-         comuna = COALESCE($12, comuna)
-       WHERE rut = $13`,
-      [nombre, apellido_paterno, apellido_materno, cargo, centro_costo, activoNuevo, motivoTerminoNuevo, fechaTerminoNuevo, motivoInactivoNuevo, tipo_contrato, direccion, comuna, req.params.rut]
+         comuna = COALESCE($12, comuna),
+         fecha_ingreso = $13
+       WHERE rut = $14`,
+      [nombre, apellido_paterno, apellido_materno, cargo, centro_costo, activoNuevo, motivoTerminoNuevo, fechaTerminoNuevo, motivoInactivoNuevo, tipo_contrato, direccion, comuna, fechaIngresoNuevo, req.params.rut]
     );
     res.json({ ok: true, activo: activoNuevo });
   } catch (err) {

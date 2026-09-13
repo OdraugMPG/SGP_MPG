@@ -564,6 +564,90 @@ async function calcularSerieCumplimiento(pool, filtros) {
   return { cargo: cargo || 'Todos', jefes_turno: filtraJefes ? jefesTurno : ['Todos'], serie };
 }
 
+// Mismos tipos que TIPOS_AUSENTISMO (arriba): causales de ausentismo real,
+// excluyendo Renuncia/Desvinculado (fin de la relación laboral, no ausentismo).
+const TIPOS_AUSENTISMO_DIARIO = ['LM', 'F_Ju', 'F_In', 'PSGS', 'PCGS', 'DC', 'PF'];
+
+// Serie diaria de ausentismo por tipo (LM, F_In, etc.), en cantidad y como
+// porcentaje del requerido de dotación de ese día — mismo cálculo de
+// "requerido" que calcularSerieCumplimiento, para que ambos paneles del
+// Dashboard sean consistentes entre sí.
+async function calcularAusentismoPorTipoDiario(pool, filtros) {
+  const { desde, hasta, cds } = filtros; // cds: null (todos) o arreglo de CDs permitidos/solicitados
+
+  const dIni = new Date(desde + 'T00:00:00');
+  const dFin = new Date(hasta + 'T00:00:00');
+  const diasTotales = Math.round((dFin - dIni) / 86400000) + 1;
+  if (diasTotales < 1 || diasTotales > 92) throw new Error('El rango debe ser de 1 a 92 días');
+
+  const { rows: feriadosRows } = await pool.query('SELECT fecha FROM feriados');
+  const feriadosSet = new Set(feriadosRows.map(r => r.fecha));
+
+  const fechas = await fechasValidas(pool, desde, hasta);
+
+  let sqlReq = 'SELECT cargo, turno, cd, vigente_desde, vigente_hasta, cantidad_requerida FROM requerimiento_dotacion WHERE 1=1';
+  const paramsReq = [];
+  if (cds) { paramsReq.push(cds); sqlReq += ` AND cd = ANY($${paramsReq.length}::text[])`; }
+  const { rows: historial } = await pool.query(sqlReq, paramsReq);
+
+  const historialPorGrupo = new Map();
+  for (const r of historial) {
+    const clave = `${r.cargo}|${r.turno}|${r.cd}`;
+    if (!historialPorGrupo.has(clave)) historialPorGrupo.set(clave, []);
+    historialPorGrupo.get(clave).push(r);
+  }
+
+  function requeridoTotalEn(fecha) {
+    let total = 0;
+    for (const [clave, registros] of historialPorGrupo) {
+      const [, t] = clave.split('|');
+      if (esDiaLibreTipoTurno(t, fecha, feriadosSet)) continue;
+      const vigente = valorVigenteEnFecha(registros, fecha);
+      if (vigente !== null) total += vigente;
+    }
+    return total;
+  }
+
+  // Solo trabajadores activos (mismo criterio que "presentes" en
+  // calcularSerieCumplimiento) — evita contar ausencias de fichas ya
+  // desactivadas.
+  let sqlAus = `SELECT a.fecha, a.tipo
+                FROM ausencias_permisos a
+                JOIN empleados e ON e.rut = a.rut
+                WHERE e.activo = true AND a.fecha BETWEEN $1 AND $2 AND a.tipo = ANY($3::text[])`;
+  const paramsAus = [desde, hasta, TIPOS_AUSENTISMO_DIARIO];
+  if (cds) { paramsAus.push(cds); sqlAus += ` AND e.cd = ANY($${paramsAus.length}::text[])`; }
+  const { rows: ausencias } = await pool.query(sqlAus, paramsAus);
+
+  const conteoPorFecha = new Map(); // fecha -> { tipo: cantidad }
+  for (const a of ausencias) {
+    if (!conteoPorFecha.has(a.fecha)) conteoPorFecha.set(a.fecha, {});
+    const acc = conteoPorFecha.get(a.fecha);
+    acc[a.tipo] = (acc[a.tipo] || 0) + 1;
+  }
+
+  const serie = fechas.map(f => {
+    const requerido = requeridoTotalEn(f);
+    const crudo = conteoPorFecha.get(f) || {};
+    const porTipo = {};
+    let total = 0;
+    for (const tipo of TIPOS_AUSENTISMO_DIARIO) {
+      const cantidad = crudo[tipo] || 0;
+      total += cantidad;
+      porTipo[tipo] = { cantidad, pct: requerido > 0 ? Math.round((cantidad / requerido) * 1000) / 10 : null };
+    }
+    return {
+      fecha: f,
+      requerido,
+      total,
+      total_pct: requerido > 0 ? Math.round((total / requerido) * 1000) / 10 : null,
+      por_tipo: porTipo,
+    };
+  });
+
+  return { tipos: TIPOS_AUSENTISMO_DIARIO, serie };
+}
+
 // Presentismo histórico mensual, por cada uno de los cargos gerenciales fijos,
 // para un set de meses (siempre 3 consecutivos: un trimestre). Filtra por
 // Jefe de Turno específico, o "Todos" para ver el día completo (todos los
@@ -686,5 +770,5 @@ async function calcularPresentismoHistorico(pool, filtros) {
 
 module.exports = {
   calcularIndicadores, exportarReporteDesvinculacionXlsx, calcularSerieCumplimiento,
-  calcularPresentismoHistorico, CARGOS_DASHBOARD,
+  calcularAusentismoPorTipoDiario, calcularPresentismoHistorico, CARGOS_DASHBOARD,
 };

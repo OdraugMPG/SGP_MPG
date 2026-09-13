@@ -329,6 +329,24 @@ export async function obtenerSerieCumplimiento(desde, hasta, cargo, jefesTurno, 
   return data;
 }
 
+export async function obtenerResumenAsistenciaArea(desde, hasta, cd) {
+  const params = new URLSearchParams({ desde, hasta });
+  if (cd) params.append('cd', cd);
+  const res = await authFetch(`${API_URL}/api/indicadores/resumen-area?${params.toString()}`);
+  const data = await res.json();
+  if (!res.ok) throw new Error(data.error || 'Error al cargar el resumen de asistencia por área');
+  return data;
+}
+
+export async function obtenerAusentismoPorTipoDiario(desde, hasta, cd) {
+  const params = new URLSearchParams({ desde, hasta });
+  if (cd) params.append('cd', cd);
+  const res = await authFetch(`${API_URL}/api/indicadores/ausentismo-diario?${params.toString()}`);
+  const data = await res.json();
+  if (!res.ok) throw new Error(data.error || 'Error al cargar el ausentismo por tipo');
+  return data;
+}
+
 export async function obtenerIndicadores(desde, hasta, area, cd) {
   const params = new URLSearchParams({ desde, hasta });
   if (area) params.append('area', area);
@@ -1153,6 +1171,108 @@ export async function eliminarFueroMaternal(id) {
   const data = await res.json();
   if (!res.ok || !data.ok) throw new Error(data.error || 'Error al eliminar el registro');
   return data;
+}
+
+// --- Anticipos de sueldo ---
+
+export async function validarAnticipos(file) {
+  const formData = new FormData();
+  formData.append('archivo', file);
+  const res = await authFetch(`${API_URL}/api/anticipos/validar`, { method: 'POST', body: formData });
+  const data = await res.json();
+  if (!res.ok || !data.ok) throw new Error(data.error || 'Error al validar los anticipos');
+  return data.filas;
+}
+
+// Genera y descarga el reporte Excel — reenvía el mismo File ya elegido
+// (el usuario solo elige el archivo una vez), no hace falta volver a
+// pedírselo.
+export async function descargarReporteAnticipos(file) {
+  const formData = new FormData();
+  formData.append('archivo', file);
+  const res = await authFetch(`${API_URL}/api/anticipos/exportar`, { method: 'POST', body: formData });
+  if (!res.ok) {
+    const data = await res.json().catch(() => ({}));
+    throw new Error(data.error || 'Error al generar el reporte');
+  }
+  const blob = await res.blob();
+  const url = window.URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = `ValidacionAnticipos_${new Date().toISOString().slice(0, 10)}.xlsx`;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  window.URL.revokeObjectURL(url);
+}
+
+// --- Marcación Móvil (piloto) ---
+
+export async function listarCdsMovil() {
+  const res = await authFetch(`${API_URL}/api/movil/admin/cds`);
+  const data = await res.json();
+  if (!res.ok) throw new Error(data.error || 'Error al listar los CDs de marcación móvil');
+  return data;
+}
+
+export async function crearCdMovil(datos) {
+  const res = await authFetch(`${API_URL}/api/movil/admin/cds`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(datos),
+  });
+  const data = await res.json();
+  if (!res.ok) throw new Error(data.error || 'Error al crear el CD');
+  return data;
+}
+
+export async function actualizarCdMovil(nombre, datos) {
+  const res = await authFetch(`${API_URL}/api/movil/admin/cds/${encodeURIComponent(nombre)}`, {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(datos),
+  });
+  const data = await res.json();
+  if (!res.ok) throw new Error(data.error || 'Error al actualizar el CD');
+  return data;
+}
+
+export async function eliminarCdMovil(nombre) {
+  const res = await authFetch(`${API_URL}/api/movil/admin/cds/${encodeURIComponent(nombre)}`, { method: 'DELETE' });
+  const data = await res.json();
+  if (!res.ok || !data.ok) throw new Error(data.error || 'Error al eliminar el CD');
+  return data;
+}
+
+export async function listarTrabajadoresMovil() {
+  const res = await authFetch(`${API_URL}/api/movil/admin/trabajadores`);
+  const data = await res.json();
+  if (!res.ok) throw new Error(data.error || 'Error al listar los trabajadores con credencial');
+  return data;
+}
+
+export async function asignarPinTrabajador(rut, pin) {
+  const res = await authFetch(`${API_URL}/api/movil/admin/trabajadores/${encodeURIComponent(rut)}/pin`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ pin }),
+  });
+  const data = await res.json();
+  if (!res.ok || !data.ok) throw new Error(data.error || 'Error al asignar el PIN');
+  return data;
+}
+
+export async function obtenerReporteMovil(filtros) {
+  const params = new URLSearchParams();
+  Object.entries(filtros).forEach(([k, v]) => { if (v) params.append(k, v); });
+  const res = await authFetch(`${API_URL}/api/movil/admin/reporte?${params.toString()}`);
+  const data = await res.json();
+  if (!res.ok) throw new Error(data.error || 'Error al consultar el reporte de marcación móvil');
+  return data;
+}
+
+export function urlFotoMarcacionMovil(id) {
+  return `${API_URL}/api/movil/admin/marcaciones/${id}/foto?token=${encodeURIComponent(obtenerToken() || '')}`;
 }
 
 export async function actualizarEmpleado(rut, datos) {

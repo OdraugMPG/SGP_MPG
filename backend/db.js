@@ -293,6 +293,51 @@ async function initDb() {
       creado_en TIMESTAMP DEFAULT now()
     );
     CREATE INDEX IF NOT EXISTS idx_informes_ia_creado ON informes_ia(creado_en DESC);
+
+    -- Catálogo de CDs con geocerca para marcación móvil (piloto). Clave TEXT
+    -- igual que cd_sucursal, no SERIAL, porque el nombre del CD ya es el
+    -- identificador natural usado en el resto del sistema (empleados.cd).
+    CREATE TABLE IF NOT EXISTS cd_movil (
+      nombre TEXT PRIMARY KEY,
+      lat DOUBLE PRECISION NOT NULL,
+      lng DOUBLE PRECISION NOT NULL,
+      radio_metros INTEGER NOT NULL DEFAULT 40,
+      activo BOOLEAN DEFAULT true,
+      creado_por TEXT,
+      creado_en TIMESTAMP DEFAULT now()
+    );
+
+    -- Credenciales de trabajador (RUT + PIN) para marcación móvil, separadas
+    -- de 'usuarios' (que es solo para staff con rol/módulos de escritorio).
+    CREATE TABLE IF NOT EXISTS trabajador_credencial (
+      rut TEXT PRIMARY KEY,
+      pin_hash TEXT NOT NULL,
+      intentos_fallidos INTEGER DEFAULT 0,
+      bloqueado_hasta TIMESTAMP,
+      creado_por TEXT,
+      creado_en TIMESTAMP DEFAULT now(),
+      actualizado_en TIMESTAMP DEFAULT now()
+    );
+
+    -- Marcaciones móviles del piloto, en paralelo a Talana/Cencosud — no se
+    -- cruzan con marcaciones_talana/marcaciones_cencosud ni entran al
+    -- pipeline de calcular.js/detalleMarcaciones.js/cierreNomina.js.
+    CREATE TABLE IF NOT EXISTS marcacion_movil (
+      id SERIAL PRIMARY KEY,
+      rut TEXT NOT NULL,
+      cd TEXT,
+      fecha TEXT NOT NULL,
+      hora TEXT NOT NULL,
+      tipo TEXT NOT NULL, -- 'entrada' | 'salida'
+      lat DOUBLE PRECISION NOT NULL,
+      lng DOUBLE PRECISION NOT NULL,
+      distancia_m DOUBLE PRECISION,
+      dentro_radio BOOLEAN,
+      foto BYTEA,
+      foto_mime TEXT,
+      creado_en TIMESTAMP DEFAULT now()
+    );
+    CREATE INDEX IF NOT EXISTS idx_marcacion_movil_rut_fecha ON marcacion_movil(rut, fecha);
   `);
 
   // Migración segura para bases creadas antes de agregar esta columna.
@@ -325,7 +370,7 @@ async function initDb() {
 
   await pool.query('ALTER TABLE empleados ADD COLUMN IF NOT EXISTS activo BOOLEAN DEFAULT true');
   await pool.query('ALTER TABLE empleados ADD COLUMN IF NOT EXISTS motivo_inactivo TEXT');
-  await pool.query("ALTER TABLE empleados ADD COLUMN IF NOT EXISTS motivo_termino TEXT"); // 'R' (Renuncia Voluntaria) o 'Des' (Desvinculación Art. 161)
+  await pool.query("ALTER TABLE empleados ADD COLUMN IF NOT EXISTS motivo_termino TEXT"); // 'R' (Renuncia Voluntaria), 'Des' (Desvinculación Art. 161), 'Des160' (Desvinculación Art. 160 N°3) o 'CcTo' (Culminación de Contrato)
   await pool.query('ALTER TABLE empleados ADD COLUMN IF NOT EXISTS fecha_termino TEXT');
   await pool.query('ALTER TABLE empleados ADD COLUMN IF NOT EXISTS tipo_contrato TEXT');
   await pool.query('ALTER TABLE empleados ADD COLUMN IF NOT EXISTS direccion TEXT');
@@ -368,7 +413,7 @@ async function initDb() {
   const TODOS_LOS_MODULOS = [
     'dashboard', 'resultados', 'detalle', 'reporte', 'nomina', 'horasExtras', 'horasExtrasSolicitar', 'horasExtrasAprobar',
     'asignacion', 'perfiles', 'requerimiento', 'ausencias', 'actualizacion', 'carga', 'usuarios', 'fueroMaternal',
-    'amonestaciones', 'feriados',
+    'amonestaciones', 'feriados', 'marcacionMovil', 'anticipos',
   ];
   const rolesIniciales = [
     { nombre: 'admin', modulos: TODOS_LOS_MODULOS, es_sistema: true },
@@ -379,7 +424,7 @@ async function initDb() {
     { nombre: 'Jefe Turno', modulos: ['dashboard', 'resultados', 'reporte', 'asignacion', 'ausencias', 'horasExtrasSolicitar'], es_sistema: false },
     { nombre: 'Supervisor', modulos: ['resultados', 'reporte', 'ausencias', 'actualizacion'], es_sistema: false },
     { nombre: 'KAM', modulos: ['dashboard', 'reporte'], es_sistema: false },
-    { nombre: 'RRHH', modulos: ['dashboard', 'resultados', 'perfiles', 'ausencias', 'requerimiento', 'nomina', 'fueroMaternal', 'amonestaciones'], es_sistema: false },
+    { nombre: 'RRHH', modulos: ['dashboard', 'resultados', 'perfiles', 'ausencias', 'requerimiento', 'nomina', 'fueroMaternal', 'amonestaciones', 'marcacionMovil', 'anticipos'], es_sistema: false },
   ];
   for (const r of rolesIniciales) {
     await pool.query(
@@ -399,6 +444,14 @@ async function initDb() {
   await pool.query(`
     UPDATE roles SET modulos = array_append(modulos, 'horasExtrasAprobar')
     WHERE nombre = 'Jefe Operaciones' AND NOT ('horasExtrasAprobar' = ANY(modulos))
+  `);
+  await pool.query(`
+    UPDATE roles SET modulos = array_append(modulos, 'marcacionMovil')
+    WHERE nombre = 'RRHH' AND NOT ('marcacionMovil' = ANY(modulos))
+  `);
+  await pool.query(`
+    UPDATE roles SET modulos = array_append(modulos, 'anticipos')
+    WHERE nombre = 'RRHH' AND NOT ('anticipos' = ANY(modulos))
   `);
 
   // Siembra inicial del horario Plano (los mismos valores que antes estaban

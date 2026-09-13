@@ -1,7 +1,9 @@
 import { useState, useEffect } from 'react';
 import { obtenerDashboardAsistencia, listarAreas, urlDescargaDashboardAsistencia } from '../api';
 import PanelIndicadores from './PanelIndicadores';
+import ResumenAsistenciaArea from './ResumenAsistenciaArea';
 import GraficoCumplimientoCargo from './GraficoCumplimientoCargo';
+import AusentismoPorTipoDiario from './AusentismoPorTipoDiario';
 import DashboardPresentismoHistorico from './DashboardPresentismoHistorico';
 import AnalisisAusentismo from './AnalisisAusentismo';
 import AnalisisMarcasAbiertas from './AnalisisMarcasAbiertas';
@@ -33,6 +35,24 @@ function hace6DiasISO() {
   return d.toISOString().slice(0, 10);
 }
 
+// Causales filtrables (mismos códigos que ausencias_permisos.tipo, sin 'P'
+// que no es una causal sino la marca de presente). El código es lo que
+// realmente aparece en cada celda de la matriz — el filtro compara contra
+// eso, no contra la categoría visual.
+const CAUSALES_FILTRABLES = [
+  { codigo: 'F_In', etiqueta: 'Falta Injustificada' },
+  { codigo: 'F_Ju', etiqueta: 'Falta Justificada' },
+  { codigo: 'LM', etiqueta: 'Licencia Médica' },
+  { codigo: 'PSGS', etiqueta: 'Permiso S/Goce' },
+  { codigo: 'PCGS', etiqueta: 'Permiso C/Goce' },
+  { codigo: 'DC', etiqueta: 'Día Compensatorio' },
+  { codigo: 'PF', etiqueta: 'Permiso Fallecimiento' },
+  { codigo: 'V', etiqueta: 'Vacaciones' },
+  { codigo: 'A', etiqueta: 'Ausente / sin marca' },
+  { codigo: 'R', etiqueta: 'Renuncia (asignada como ausencia)' },
+  { codigo: 'Dv', etiqueta: 'Desvinculado (asignado como ausencia)' },
+];
+
 const CLASE_POR_CATEGORIA = {
   ok: 'matriz-ok',
   inconsistencia: 'matriz-inconsistencia',
@@ -50,6 +70,7 @@ export default function DashboardAsistencia({ cdGlobal }) {
   const [area, setArea] = useState('');
   const [areas, setAreas] = useState([]);
   const [filtroNombre, setFiltroNombre] = useState('');
+  const [causalesFiltro, setCausalesFiltro] = useState([]);
 
   const [data, setData] = useState(null);
   const [cargando, setCargando] = useState(false);
@@ -74,18 +95,30 @@ export default function DashboardAsistencia({ cdGlobal }) {
 
   useEffect(() => { buscar(); }, []); // carga inicial con el rango por defecto
 
+  function toggleCausal(codigo) {
+    setCausalesFiltro(prev => prev.includes(codigo) ? prev.filter(c => c !== codigo) : [...prev, codigo]);
+  }
+
   const trabajadoresFiltrados = data
     ? data.trabajadores.filter(t => {
-        if (!filtroNombre.trim()) return true;
-        const q = filtroNombre.trim().toLowerCase();
-        return t.nombre.toLowerCase().includes(q) || t.rut.toLowerCase().includes(q);
+        if (filtroNombre.trim()) {
+          const q = filtroNombre.trim().toLowerCase();
+          if (!(t.nombre.toLowerCase().includes(q) || t.rut.toLowerCase().includes(q))) return false;
+        }
+        if (causalesFiltro.length > 0) {
+          const tieneCausalEnRango = data.fechas.some(f => causalesFiltro.includes(t.estados[f]?.codigo));
+          if (!tieneCausalEnRango) return false;
+        }
+        return true;
       })
     : [];
 
   return (
     <>
+      <ResumenAsistenciaArea cdGlobal={cdGlobal} />
       <PanelIndicadores cd={cdGlobal} />
       <GraficoCumplimientoCargo cdGlobal={cdGlobal} />
+      <AusentismoPorTipoDiario cdGlobal={cdGlobal} />
       <DashboardPresentismoHistorico cdGlobal={cdGlobal} />
       <AnalisisIA cdGlobal={cdGlobal} />
       <AnalisisAusentismo cdGlobal={cdGlobal} />
@@ -140,9 +173,49 @@ export default function DashboardAsistencia({ cdGlobal }) {
         <span className="badge matriz-diaLibre" style={{ padding: '3px 10px' }}>DFNL — Día Feriado No Laborado</span>
         <span className="badge matriz-diaLibreTrabajado" style={{ padding: '3px 10px' }}>DFT — Día Feriado Trabajado</span>
         <span className="badge matriz-ausente" style={{ padding: '3px 10px' }}>A — Sin ninguna marca</span>
+        <span className="badge matriz-termino" style={{ padding: '3px 10px' }}>SC — Sin Contrato (antes del ingreso/reingreso)</span>
         <span className="badge matriz-termino" style={{ padding: '3px 10px' }}>Rnv — Renuncia Voluntaria</span>
-        <span className="badge matriz-termino" style={{ padding: '3px 10px' }}>Dsv — Desvinculado</span>
+        <span className="badge matriz-termino" style={{ padding: '3px 10px' }}>Dsv — Desvinculado (Art. 161)</span>
+        <span className="badge matriz-termino" style={{ padding: '3px 10px' }}>D160 — Desvinculado (Art. 160 N°3)</span>
         <span className="badge matriz-termino" style={{ padding: '3px 10px' }}>CcTo — Culminación de Contrato</span>
+      </div>
+
+      <div className="field" style={{ marginBottom: 16 }}>
+        <label>
+          Filtrar por causal {causalesFiltro.length > 0 && (
+            <button
+              type="button" onClick={() => setCausalesFiltro([])}
+              style={{ background: 'none', border: 'none', color: 'var(--accent)', cursor: 'pointer', fontSize: '0.78rem', padding: 0, marginLeft: 6 }}
+            >
+              (limpiar)
+            </button>
+          )}
+        </label>
+        <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
+          {CAUSALES_FILTRABLES.map(({ codigo, etiqueta }) => {
+            const activo = causalesFiltro.includes(codigo);
+            return (
+              <button
+                key={codigo}
+                type="button"
+                onClick={() => toggleCausal(codigo)}
+                className="badge matriz-ausencia"
+                style={{
+                  padding: '3px 10px', fontSize: '0.78rem', cursor: 'pointer',
+                  border: activo ? '1px solid var(--accent)' : '1px solid transparent',
+                  opacity: causalesFiltro.length > 0 && !activo ? 0.45 : 1,
+                }}
+              >
+                {codigo} — {etiqueta}
+              </button>
+            );
+          })}
+        </div>
+        {causalesFiltro.length > 0 && (
+          <p style={{ fontSize: '0.76rem', color: 'var(--text-muted)', marginTop: 6, marginBottom: 0 }}>
+            Mostrando solo trabajadores con {causalesFiltro.join(', ')} en el rango de fechas visible.
+          </p>
+        )}
       </div>
 
       {error && <p className="status-msg error">{error}</p>}

@@ -1,7 +1,9 @@
 // Analiza la rotación de personal (altas y bajas, no rotación de turnos) por
 // mes, usando fecha_ingreso/fecha_termino/motivo_termino de la tabla
-// empleados. motivo_termino: 'R' (Renuncia Voluntaria) o 'Des'
-// (Desvinculación Art. 161), sembrado por el módulo de Perfil de Trabajador.
+// empleados. motivo_termino: 'R' (Renuncia Voluntaria), 'Des' (Desvinculación
+// Art. 161) o 'Des160' (Desvinculación Art. 160 N°3), sembrado por el módulo
+// de Perfil de Trabajador.
+const CAUSALES_BAJA_INVOLUNTARIA = ['Des', 'Des160'];
 
 function rangoMes(anio, mes) {
   const ultimoDia = new Date(anio, mes, 0).getDate(); // día 0 del mes siguiente = último día de este mes
@@ -63,7 +65,7 @@ async function calcularRotacionPersonal(pool, filtros) {
       etiqueta: m.etiqueta, desde: m.inicio, hasta: m.fin,
       altas: altas.length, bajas: bajas.length,
       bajas_voluntarias: bajas.filter(b => b.motivo_termino === 'R').length,
-      bajas_involuntarias: bajas.filter(b => b.motivo_termino === 'Des').length,
+      bajas_involuntarias: bajas.filter(b => CAUSALES_BAJA_INVOLUNTARIA.includes(b.motivo_termino)).length,
       dotacion_inicio: dotacionInicio, dotacion_fin: dotacionFin,
       tasa_rotacion_pct: dotacionPromedio > 0 ? Number(((bajas.length / dotacionPromedio) * 100).toFixed(1)) : 0,
     };
@@ -84,7 +86,7 @@ async function calcularRotacionPersonal(pool, filtros) {
       const r = acumulador(e.cargo, e.cd);
       r.bajas++;
       if (e.motivo_termino === 'R') r.bajas_voluntarias++;
-      else if (e.motivo_termino === 'Des') r.bajas_involuntarias++;
+      else if (CAUSALES_BAJA_INVOLUNTARIA.includes(e.motivo_termino)) r.bajas_involuntarias++;
     }
   }
   const dotacionActualPorCargoCd = new Map();

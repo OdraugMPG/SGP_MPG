@@ -1,0 +1,129 @@
+:root {
+  --bg: #0f172a;
+  --surface: #1e293b;
+  --border: #334155;
+  --text: #f1f5f9;
+  --text-muted: #94a3b8;
+  --accent: #3b82f6;
+  --ok: #22c55e;
+  --warn: #f59e0b;
+  --danger: #ef4444;
+  color-scheme: dark;
+}
+
+* { box-sizing: border-box; }
+
+html, body, #root {
+  height: 100%;
+  margin: 0;
+}
+
+body {
+  background: var(--bg);
+  color: var(--text);
+  font-family: system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif;
+  -webkit-tap-highlight-color: transparent;
+}
+
+.pantalla {
+  min-height: 100vh;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  padding: 24px 16px;
+  gap: 16px;
+}
+
+.tarjeta {
+  width: 100%;
+  max-width: 380px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 16px;
+  padding: 24px;
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+
+h1 { font-size: 1.3rem; margin: 0; }
+p.desc { color: var(--text-muted); font-size: 0.85rem; margin: 0; }
+
+label { font-size: 0.8rem; color: var(--text-muted); display: block; margin-bottom: 4px; }
+
+input[type="text"], input[type="password"], input[type="number"] {
+  width: 100%;
+  padding: 12px 14px;
+  border-radius: 10px;
+  border: 1px solid var(--border);
+  background: #0b1220;
+  color: var(--text);
+  font-size: 1rem;
+}
+
+button.btn-primario {
+  width: 100%;
+  padding: 14px;
+  border-radius: 10px;
+  border: none;
+  background: var(--accent);
+  color: white;
+  font-size: 1rem;
+  font-weight: 600;
+  cursor: pointer;
+}
+button.btn-primario:disabled { opacity: 0.6; cursor: default; }
+
+button.btn-secundario {
+  width: 100%;
+  padding: 12px;
+  border-radius: 10px;
+  border: 1px solid var(--border);
+  background: transparent;
+  color: var(--text-muted);
+  font-size: 0.9rem;
+  cursor: pointer;
+}
+
+.selector-tipo {
+  display: flex;
+  gap: 8px;
+}
+.selector-tipo button {
+  flex: 1;
+  padding: 12px;
+  border-radius: 10px;
+  border: 1px solid var(--border);
+  background: transparent;
+  color: var(--text);
+  font-size: 0.95rem;
+  cursor: pointer;
+}
+.selector-tipo button.activo {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: white;
+}
+
+.mensaje { font-size: 0.85rem; border-radius: 8px; padding: 10px 12px; }
+.mensaje.error { background: rgba(239,68,68,0.15); color: #fca5a5; }
+.mensaje.ok { background: rgba(34,197,94,0.15); color: #86efac; }
+
+.foto-previa {
+  width: 100%;
+  border-radius: 10px;
+  border: 1px solid var(--border);
+  max-height: 220px;
+  object-fit: cover;
+}
+
+.enlace {
+  background: none;
+  border: none;
+  color: var(--accent);
+  font-size: 0.85rem;
+  cursor: pointer;
+  padding: 0;
+  text-align: center;
+}

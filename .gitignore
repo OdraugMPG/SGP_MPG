@@ -17,6 +17,8 @@ backend/uploads/
 
 # Build de producción del frontend
 frontend/dist/
+frontend-movil/dist/
+frontend-movil/dev-dist/
 
 # Logs
 npm-debug.log*

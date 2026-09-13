@@ -1,5 +1,6 @@
 import { useState } from 'react';
 import { iniciarSesion } from '../api';
+import logoSGP from '../img/LogoSGP-marca.webp';
 
 export default function Login({ onIngreso }) {
   const [usuario, setUsuario] = useState('');
@@ -27,33 +28,35 @@ export default function Login({ onIngreso }) {
   return (
     <div style={estilos.pagina}>
       <div style={estilos.panelIzquierdo}>
-        <div style={estilos.logoWrap}>
-          <div style={estilos.logoTitulo}>SGP</div>
-          <div style={estilos.logoSubtitulo}>
-            SISTEMA GESTIÓN DE <span style={{ color: '#3fd68c' }}>PERSONAS</span>
+        <div style={estilos.contenidoIzquierdo}>
+          <div style={estilos.logoWrap}>
+            <img src={logoSGP} alt="SGP" style={estilos.logoImagen} />
+            <div style={estilos.logoSubtitulo}>
+              SISTEMA GESTIÓN DE <span style={{ color: '#3fd68c' }}>PERSONAS</span>
+            </div>
           </div>
-        </div>
-        <p style={estilos.tagline}>
-          Tecnología que <span style={{ color: '#5fb8f5' }}>impulsa</span> personas.<br />
-          Personas que <span style={{ color: '#3fd68c' }}>transforman</span> organizaciones.
-        </p>
+          <p style={estilos.tagline}>
+            Tecnología que <span style={{ color: '#5fb8f5' }}>impulsa</span> personas.<br />
+            Personas que <span style={{ color: '#3fd68c' }}>transforman</span> organizaciones.
+          </p>
 
-        <div style={estilos.featuresGrid}>
-          <div style={estilos.feature}>
-            <strong>Gestión Centralizada</strong>
-            <span>Toda la información en un solo lugar</span>
-          </div>
-          <div style={estilos.feature}>
-            <strong>Seguridad</strong>
-            <span>Protección de datos y acceso seguro</span>
-          </div>
-          <div style={estilos.feature}>
-            <strong>Analítica</strong>
-            <span>Datos que generan mejores decisiones</span>
-          </div>
-          <div style={estilos.feature}>
-            <strong>Eficiencia</strong>
-            <span>Procesos simples, resultados grandes</span>
+          <div style={estilos.featuresGrid}>
+            <div style={estilos.feature}>
+              <strong>Gestión Centralizada</strong>
+              <span>Toda la información en un solo lugar</span>
+            </div>
+            <div style={estilos.feature}>
+              <strong>Seguridad</strong>
+              <span>Protección de datos y acceso seguro</span>
+            </div>
+            <div style={estilos.feature}>
+              <strong>Analítica</strong>
+              <span>Datos que generan mejores decisiones</span>
+            </div>
+            <div style={estilos.feature}>
+              <strong>Eficiencia</strong>
+              <span>Procesos simples, resultados grandes</span>
+            </div>
           </div>
         </div>
       </div>
@@ -140,16 +143,21 @@ const estilos = {
     flex: '1.1',
     display: 'flex',
     flexDirection: 'column',
+    alignItems: 'center',
     justifyContent: 'center',
     padding: '60px 70px',
     background: 'radial-gradient(circle at 30% 30%, #12244a 0%, #0a1224 70%)',
   },
+  contenidoIzquierdo: {
+    width: '100%',
+    maxWidth: 480,
+  },
   logoWrap: { marginBottom: 28 },
-  logoTitulo: {
-    fontSize: '4rem',
-    fontWeight: 800,
-    letterSpacing: '0.05em',
-    lineHeight: 1,
+  logoImagen: {
+    display: 'block',
+    width: '100%',
+    maxWidth: 380,
+    height: 'auto',
   },
   logoSubtitulo: {
     fontSize: '0.95rem',

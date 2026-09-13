@@ -352,25 +352,38 @@ function PanelActivacionMasiva() {
       {resultado && (
         <p className="status-msg ok" style={{ marginTop: 10 }}>
           ✓ {resultado.ruts_en_archivo} RUTs en el archivo · {resultado.activados} activos · {resultado.desactivados} inactivos (de {resultado.total} trabajadores en total)
+          {resultado.reactivados > 0 && ` · ${resultado.reactivados} reactivados hoy (fecha de ingreso actualizada a hoy para que no cuenten como "Ausente" en el Dashboard antes de esta fecha)`}
         </p>
       )}
     </div>
   );
 }
 
+// Códigos de motivo_termino que representan el fin de la relación laboral
+// (a diferencia de 'activo' o 'inactivo_legado', un registro anterior sin
+// motivo estructurado).
+const ESTADOS_TERMINO = ['R', 'Des', 'Des160', 'CcTo'];
+
 function estadoActualDeEmpleado(empleado) {
-  if (empleado.motivo_termino === 'R' || empleado.motivo_termino === 'Des' || empleado.motivo_termino === 'CcTo') return empleado.motivo_termino;
+  if (ESTADOS_TERMINO.includes(empleado.motivo_termino)) return empleado.motivo_termino;
   return empleado.activo === false ? 'inactivo_legado' : 'activo';
 }
 
 function etiquetaMotivoTermino(motivo) {
   if (motivo === 'R') return 'Renuncia';
-  if (motivo === 'Des') return 'Desvinculación';
+  if (motivo === 'Des') return 'Desvinculación (Art. 161)';
+  if (motivo === 'Des160') return 'Desvinculación (Art. 160 N°3)';
   if (motivo === 'CcTo') return 'Culminación de Contrato';
   return motivo;
 }
 
 function FormularioEdicion({ empleado, areas, cargos, onGuardado, onCancelar }) {
+  // Capturado una sola vez al abrir el formulario (no cambia con los edits en
+  // curso): si estaba realmente inactivo en la base (más allá de qué diga el
+  // select mientras se edita), reactivarlo exige pedir desde cuándo vuelve a
+  // estar activo — si no, el Dashboard de Asistencia marca "Ausente" todos
+  // los días entre la baja anterior y hoy, por no tener ninguna marca real.
+  const estabaInactivo = empleado.activo === false;
   const [form, setForm] = useState({
     nombre: empleado.nombre || '',
     apellido_paterno: empleado.apellido_paterno || '',
@@ -379,6 +392,7 @@ function FormularioEdicion({ empleado, areas, cargos, onGuardado, onCancelar }) 
     centro_costo: empleado.centro_costo || '',
     estado: estadoActualDeEmpleado(empleado),
     fecha_termino: empleado.fecha_termino || hoyISO(),
+    fecha_ingreso: empleado.fecha_ingreso || hoyISO(),
     motivo_inactivo: empleado.motivo_inactivo || '',
     tipo_contrato: empleado.tipo_contrato_efectivo || empleado.tipo_contrato || 'OUT',
     direccion: empleado.direccion || '',
@@ -390,7 +404,7 @@ function FormularioEdicion({ empleado, areas, cargos, onGuardado, onCancelar }) 
   const [confirmarDesafuero, setConfirmarDesafuero] = useState(false);
 
   async function guardar() {
-    if ((form.estado === 'R' || form.estado === 'Des' || form.estado === 'CcTo') && !form.fecha_termino) {
+    if (ESTADOS_TERMINO.includes(form.estado) && !form.fecha_termino) {
       setError('Debes indicar la fecha de renuncia/desvinculación.');
       return;
     }
@@ -470,13 +484,27 @@ function FormularioEdicion({ empleado, areas, cargos, onGuardado, onCancelar }) 
               <option value="activo">Activo</option>
               <option value="R">Renuncia Voluntaria</option>
               <option value="Des">Desvinculación (Art. 161 — Necesidades de la Empresa)</option>
+              <option value="Des160">Desvinculación (Art. 160 N°3 — Inasistencia injustificada)</option>
               <option value="CcTo">Culminación de Contrato</option>
               {form.estado === 'inactivo_legado' && <option value="inactivo_legado">Inactivo (registro anterior, sin motivo estructurado)</option>}
             </select>
           </div>
-          {(form.estado === 'R' || form.estado === 'Des' || form.estado === 'CcTo') && (
+          {estabaInactivo && form.estado === 'activo' && (
             <div className="field">
-              <label>Fecha de {form.estado === 'R' ? 'renuncia' : form.estado === 'Des' ? 'desvinculación' : 'culminación de contrato'}</label>
+              <label>Fecha de reingreso</label>
+              <input
+                type="date" value={form.fecha_ingreso}
+                onChange={e => setForm(f => ({ ...f, fecha_ingreso: e.target.value }))}
+                style={{ width: '100%', background: 'var(--surface)', border: '1px solid var(--border)', borderRadius: 6, padding: '7px 9px', color: 'var(--text)' }}
+              />
+              <span style={{ fontSize: '0.75rem', color: 'var(--text-muted)' }}>
+                Los días previos a esta fecha no cuentan como "Ausente" en el Dashboard de Asistencia.
+              </span>
+            </div>
+          )}
+          {ESTADOS_TERMINO.includes(form.estado) && (
+            <div className="field">
+              <label>Fecha de {form.estado === 'R' ? 'renuncia' : form.estado === 'CcTo' ? 'culminación de contrato' : 'desvinculación'}</label>
               <input
                 type="date" value={form.fecha_termino}
                 onChange={e => setForm(f => ({ ...f, fecha_termino: e.target.value }))}
@@ -484,7 +512,7 @@ function FormularioEdicion({ empleado, areas, cargos, onGuardado, onCancelar }) 
               />
             </div>
           )}
-          {(form.estado === 'R' || form.estado === 'Des' || form.estado === 'CcTo') && (
+          {ESTADOS_TERMINO.includes(form.estado) && (
             <div className="field">
               <label>Observación (opcional)</label>
               <input
@@ -496,11 +524,19 @@ function FormularioEdicion({ empleado, areas, cargos, onGuardado, onCancelar }) 
             </div>
           )}
         </div>
-        {(form.estado === 'R' || form.estado === 'Des' || form.estado === 'CcTo') && (
+        {ESTADOS_TERMINO.includes(form.estado) && (
           <p style={{ fontSize: '0.78rem', color: 'var(--text-muted)', marginTop: -6, marginBottom: 12 }}>
             Queda <strong>activo</strong> hasta fin de este mes (para no perder su procesamiento de
             asistencia), y pasa a inactivo automáticamente a partir del mes siguiente a la fecha
             indicada.
+          </p>
+        )}
+        {form.estado === 'Des160' && (
+          <p style={{ fontSize: '0.78rem', color: 'var(--warn)', marginTop: -6, marginBottom: 12 }}>
+            Verifica con RRHH/Legal que las faltas realmente carezcan de causa justificada antes de
+            invocar esta causal — una aplicación incorrecta genera recargo del 80% en indemnizaciones.
+            Puedes revisar los casos detectados automáticamente en Dashboard → Alertas de Desvinculación
+            (Art. 160 N°3).
           </p>
         )}
         {error && <p className="status-msg error">{error}</p>}
@@ -529,6 +565,7 @@ function FormularioEdicion({ empleado, areas, cargos, onGuardado, onCancelar }) 
 function FormularioCreacion({ areas, cargos, onCreado, onCancelar }) {
   const [form, setForm] = useState({
     rut: '', nombre: '', apellido_paterno: '', apellido_materno: '', cargo: '', centro_costo: '',
+    fecha_ingreso: hoyISO(),
   });
   const [guardando, setGuardando] = useState(false);
   const [error, setError] = useState(null);
@@ -585,7 +622,14 @@ function FormularioCreacion({ areas, cargos, onCreado, onCancelar }) {
             {areas.map(a => <option key={a} value={a}>{a}</option>)}
           </select>
         </div>
+        <div className="field">
+          <label>Fecha de ingreso</label>
+          <input type="date" value={form.fecha_ingreso} onChange={e => setForm(f => ({ ...f, fecha_ingreso: e.target.value }))} className="file-input" />
+        </div>
       </div>
+      <p className="card-desc" style={{ marginTop: -8 }}>
+        Los días previos a esta fecha no cuentan como "Ausente" en el Dashboard de Asistencia.
+      </p>
       {error && <p className="status-msg error">{error}</p>}
       <div className="btn-row">
         <button className="btn" type="button" disabled={guardando} onClick={guardar}>
@@ -781,7 +825,7 @@ export default function PerfilTrabajador({ cdGlobal }) {
                           <span className="badge badge-danger" title={emp.motivo_inactivo || ''}>
                             Inactivo {emp.motivo_termino ? `(${etiquetaMotivoTermino(emp.motivo_termino)})` : ''}
                           </span>
-                        ) : (emp.motivo_termino === 'R' || emp.motivo_termino === 'Des' || emp.motivo_termino === 'CcTo') ? (
+                        ) : ESTADOS_TERMINO.includes(emp.motivo_termino) ? (
                           <span className="badge badge-warn" title={`Pasa a inactivo el mes siguiente a ${emp.fecha_termino}`}>
                             Activo — {etiquetaMotivoTermino(emp.motivo_termino)} {emp.fecha_termino}
                           </span>

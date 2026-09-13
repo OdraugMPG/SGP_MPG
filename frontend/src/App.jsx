@@ -18,6 +18,8 @@ import DetalleMarcaciones from './components/DetalleMarcaciones';
 import Login from './components/Login';
 import GestionUsuarios from './components/GestionUsuarios';
 import RequerimientoDotacion from './components/RequerimientoDotacion';
+import MarcacionMovilAdmin from './components/MarcacionMovilAdmin';
+import AnticiposSueldo from './components/AnticiposSueldo';
 import { obtenerToken, obtenerUsuarioActual, cerrarSesion, obtenerMisModulos, listarCds } from './api';
 import './index.css';
 
@@ -43,6 +45,7 @@ const GRUPOS_MENU = [
       { key: 'nomina', label: 'Cierre de Nómina' },
       { key: 'horasExtras', label: 'Horas Extras' },
       { key: 'horasExtrasOrdinarias', label: 'Aprobación Horas Extras' },
+      { key: 'anticipos', label: 'Anticipos de Sueldo' },
     ],
   },
   {
@@ -61,6 +64,7 @@ const GRUPOS_MENU = [
     items: [
       { key: 'feriados', label: 'Feriados' },
       { key: 'usuarios', label: 'Usuarios' },
+      { key: 'marcacionMovil', label: 'Marcación Móvil (Piloto)' },
     ],
   },
 ];
@@ -323,6 +327,16 @@ export default function App() {
             {modulosHabilitados.includes('usuarios') && (
               <div style={{ display: tab === 'usuarios' ? 'block' : 'none' }}>
                 <GestionUsuarios usuarioActual={usuario} />
+              </div>
+            )}
+            {modulosHabilitados.includes('marcacionMovil') && (
+              <div style={{ display: tab === 'marcacionMovil' ? 'block' : 'none' }}>
+                <MarcacionMovilAdmin />
+              </div>
+            )}
+            {modulosHabilitados.includes('anticipos') && (
+              <div style={{ display: tab === 'anticipos' ? 'block' : 'none' }}>
+                <AnticiposSueldo />
               </div>
             )}
           </main>
